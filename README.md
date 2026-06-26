@@ -43,6 +43,10 @@ procare_media/
 3. Choose option **1**, then type your Procare **email** and **password** (hidden, never saved).
 4. When it finishes, your **`Open Scrapbook.html`** opens automatically.
 
+If your child has been in more than one class/room over time, the guided menu shows the
+classes it finds (with their date ranges) and lets you pick one — so you can make a
+scrapbook for just that class/year. (You can also set an exact range with `--since`/`--until`.)
+
 See **`READ ME FIRST.txt`** for the same steps in plain language.
 
 ---
@@ -68,7 +72,8 @@ It asks for your password at a hidden prompt, downloads everything, then builds 
 | `--zip`           | Bundle the whole folder into one `Procare Scrapbook.zip` | |
 | `--school`        | School name shown on the scrapbook (auto-detected if omitted) | `--school "The Brunswick School"` |
 | `--class-name`    | Class/room name shown on the scrapbook (auto-detected from the feed if omitted) | `--class-name "Emerald Lilies"` |
-| `--since`         | Only media on/after this date | `--since 2024-09-01` |
+| `--since`         | Only include media on/after this date | `--since 2024-09-01` |
+| `--until`         | Only include media on/before this date | `--until 2025-06-30` |
 | `--overwrite`     | Re-download files that already exist | |
 | `--videos-only`   | Only process videos | |
 | `--debug`         | Save one sample of each activity type to `debug_activities.json` | |

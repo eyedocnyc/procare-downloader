@@ -463,18 +463,19 @@ def find_local_media(out_dir, dt, label, ident):
 
 
 def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
-               default_ext, seen=None, overwrite=False):
+               default_ext, seen=None, overwrite=False, until_dt=None):
     """Download one media item into its monthly folder and timestamp it.
 
     `seen` is a set used to dedup the same file across feeds within one run
     (e.g. a video that appears in both the gallery and the activity feed).
+    `since_dt`/`until_dt` bound which capture dates are kept.
     """
     if not url:
         stats["failed"] += 1
         return
     if dt is None:
         dt = datetime.now()
-    if since_dt and dt < since_dt:
+    if (since_dt and dt < since_dt) or (until_dt and dt > until_dt):
         stats["skipped_old"] += 1
         return
 
@@ -519,7 +520,7 @@ def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
 
 
 def process_simple_feed(session, base, label, path, out_dir, since_dt, stats,
-                        seen=None, overwrite=False):
+                        seen=None, overwrite=False, until_dt=None):
     """Paginated feed where each item is itself the media (e.g. parent/videos/)."""
     default_ext = ".jpg" if label == "photo" else ".mp4"
     page = 1
@@ -541,7 +542,8 @@ def process_simple_feed(session, base, label, path, out_dir, since_dt, stats,
             # activity feed (which only ever sees the URL).
             save_media(session, url, find_capture_dt(item), label,
                        id_from_url(url) if url else None,
-                       out_dir, since_dt, stats, default_ext, seen=seen, overwrite=overwrite)
+                       out_dir, since_dt, stats, default_ext, seen=seen,
+                       overwrite=overwrite, until_dt=until_dt)
         print(f"  ...{label}s page {page} done "
               f"(downloaded {stats['downloaded']}, skipped {stats['skipped_exist']})")
         page += 1
@@ -669,31 +671,17 @@ def collect_media_entries(it):
     return entries
 
 
-def process_activities(session, base, kids, out_dir, since_dt, stats,
-                       seen=None, debug=False, overwrite=False, records=None,
-                       download=True, kinds_filter=None):
-    """Download photos AND videos from the daily-activities feed (all types).
-
-    Walks the timeline month-by-month (the feed caps how much it returns per
-    query). Media can be attached to any activity type (learning, observation,
-    incident, note, ...), so we scan every activity for attached photos/videos
-    rather than filtering to photo_activity only. Videos here dedup against the
-    dedicated videos feed via `seen`.
-
-    If `records` (a list) is given, every activity is appended to it (deduped by
-    `id`) so the caller can build the scrapbook from the full feed.
-    """
-    start_date = since_dt.date() if since_dt else ACTIVITY_EARLIEST_DEFAULT
-    end_date = date.today()
+def fetch_all_records(session, base, kids, start_date, end_date,
+                      debug=False, out_dir=None):
+    """Walk the daily-activities feed (JSON only, no downloads) and return the
+    list of activity records, deduped by id. Walks month-by-month because the
+    feed caps how much it returns per query."""
     url = base + ACTIVITIES_PATH
-    type_counts = {}          # activity_type -> count (for visibility/debug)
-    type_samples = {}         # activity_type -> one raw item (debug only)
-    record_ids = set()        # dedup activity records across kids
-
+    records, record_ids = [], set()
+    type_counts, type_samples = {}, {}
     for kid_id in kids:
         for win_from, win_to in month_windows(start_date, end_date):
             page = 1
-            month_found = 0
             while True:
                 params = {
                     "kid_id": kid_id,
@@ -716,41 +704,80 @@ def process_activities(session, base, kids, out_dir, since_dt, stats,
                     type_counts[atype] = type_counts.get(atype, 0) + 1
                     if debug:
                         type_samples.setdefault(atype, it)
-                    if records is not None:
-                        rid = it.get("id")
-                        if rid not in record_ids:
-                            record_ids.add(rid)
-                            records.append(it)
-                    if not download:
-                        continue
-                    for media_url, dt, ident, kind in collect_media_entries(it):
-                        if kinds_filter and kind not in kinds_filter:
-                            continue
-                        default_ext = ".mp4" if kind == "video" else ".jpg"
-                        save_media(session, media_url, dt, kind, ident,
-                                   out_dir, since_dt, stats, default_ext,
-                                   seen=seen, overwrite=overwrite)
-                        month_found += 1
+                    rid = it.get("id")
+                    if rid not in record_ids:
+                        record_ids.add(rid)
+                        records.append(it)
                 page += 1
                 time.sleep(POLITE_DELAY)
-            if month_found:
-                print(f"  ...activity media (child {kid_id}) {win_from[:7]}: {month_found} found "
-                      f"(downloaded {stats['downloaded']}, skipped {stats['skipped_exist']})")
 
-    # Show what activity types exist, so missing photos are easy to diagnose.
     if type_counts:
         summary = ", ".join(f"{t}:{c}" for t, c in sorted(type_counts.items()))
-        print(f"\n  Activity types seen: {summary}")
-    if debug and type_samples:
+        print(f"  Activity types seen: {summary}")
+    if debug and out_dir and type_samples:
         dump_path = os.path.join(out_dir, "debug_activities.json")
         try:
-            import json
             with open(dump_path, "w", encoding="utf-8") as fh:
                 json.dump({"counts": type_counts, "samples": type_samples},
                           fh, indent=2, default=str)
             print(f"  [debug] wrote one sample of each activity type to {dump_path}")
         except Exception as e:
             print(f"  [debug] could not write dump: {e}")
+    return records
+
+
+def in_range(dt, since_dt, until_dt):
+    """True if dt falls within the (optional) since/until bounds."""
+    if dt is None:
+        return True
+    if since_dt and dt < since_dt:
+        return False
+    if until_dt and dt > until_dt:
+        return False
+    return True
+
+
+def class_spans(records):
+    """Map each class/room name -> [first_date, last_date, count] from the feed.
+    Class only appears on attendance records (activiable.section.name)."""
+    spans = {}
+    for it in records:
+        if not isinstance(it, dict):
+            continue
+        act = it.get("activiable")
+        sec = act.get("section") if isinstance(act, dict) else None
+        name = sec.get("name").strip() if isinstance(sec, dict) and sec.get("name") else None
+        if not name:
+            continue
+        d = it.get("activity_date")
+        if not d:
+            dt = find_capture_dt(it)
+            d = dt.strftime("%Y-%m-%d") if dt else None
+        if not d:
+            continue
+        d = d[:10]
+        s = spans.setdefault(name, [d, d, 0])
+        s[0] = min(s[0], d)
+        s[1] = max(s[1], d)
+        s[2] += 1
+    return spans
+
+
+def download_records(session, records, out_dir, since_dt, until_dt, stats,
+                     seen=None, overwrite=False, kinds_filter=None):
+    """Download the photos/videos attached to the given activity records."""
+    total = len(records)
+    for idx, it in enumerate(records):
+        for media_url, dt, ident, kind in collect_media_entries(it):
+            if kinds_filter and kind not in kinds_filter:
+                continue
+            default_ext = ".mp4" if kind == "video" else ".jpg"
+            save_media(session, media_url, dt, kind, ident, out_dir, since_dt,
+                       stats, default_ext, seen=seen, overwrite=overwrite,
+                       until_dt=until_dt)
+        if total and (idx + 1) % 200 == 0:
+            print(f"  ...scanned {idx + 1}/{total} activities "
+                  f"(downloaded {stats['downloaded']}, skipped {stats['skipped_exist']})")
 
 
 def make_zip(out_dir):
@@ -782,7 +809,8 @@ def build_parser():
                                              "and optionally build a browsable scrapbook.")
     ap.add_argument("--email", help="Procare account email")
     ap.add_argument("--out", default="procare_media", help="Output directory (default: procare_media)")
-    ap.add_argument("--since", help="Only download media on/after this date, format YYYY-MM-DD")
+    ap.add_argument("--since", help="Only include media on/after this date (YYYY-MM-DD)")
+    ap.add_argument("--until", help="Only include media on/before this date (YYYY-MM-DD)")
     ap.add_argument("--scrapbook", action="store_true",
                     help="After downloading, build a browsable HTML scrapbook of the whole feed")
     ap.add_argument("--scrapbook-only", action="store_true",
@@ -808,6 +836,7 @@ def build_parser():
 def guided(args):
     """Interactive menu for when the program is launched with no arguments
     (e.g. the .exe is double-clicked). Mutates and returns `args`."""
+    args._interactive = True
     print("=" * 52)
     print("  Procare Photo, Video & Scrapbook Downloader")
     print("=" * 52)
@@ -829,6 +858,24 @@ def guided(args):
             args.school = s
     print()
     return args
+
+
+def pick_class(spans):
+    """Interactive: show classes/rooms found and let the user pick one.
+    Returns (since_str, until_str, class_name) or (None, None, None) for all."""
+    items = sorted(spans.items(), key=lambda kv: kv[1][0])
+    if len(items) < 2:
+        return None, None, (items[0][0] if items else None)
+    print("Which class/period would you like to include?")
+    for i, (name, (d0, d1, count)) in enumerate(items, 1):
+        print(f"  [{i}] {name}  ({d0} to {d1}, {count} entries)")
+    print("  [0] All history (default)")
+    choice = input("Pick a number then Enter (default 0): ").strip() or "0"
+    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(items):
+        return None, None, None
+    name, (d0, d1, _) = items[int(choice) - 1]
+    print()
+    return d0, d1, name
 
 
 def main():
@@ -873,12 +920,19 @@ def run(args):
     email = args.email or input("Procare email: ").strip()
     password = getpass.getpass("Procare password (input hidden): ")
 
-    since_dt = None
-    if args.since:
+    def parse_date(value, flag):
+        if not value:
+            return None
         try:
-            since_dt = datetime.strptime(args.since, "%Y-%m-%d")
+            return datetime.strptime(value, "%Y-%m-%d")
         except ValueError:
-            sys.exit("--since must be in YYYY-MM-DD format, e.g. 2024-09-01")
+            sys.exit(f"{flag} must be in YYYY-MM-DD format, e.g. 2024-09-01")
+
+    since_dt = parse_date(args.since, "--since")
+    until_dt = parse_date(args.until, "--until")
+    if until_dt:  # make --until inclusive of the whole day
+        until_dt = until_dt.replace(hour=23, minute=59, second=59)
+    interactive = getattr(args, "_interactive", False)
 
     if not HAVE_PIEXIF:
         print("Note: 'piexif' not installed — photos will download but EXIF dates won't be "
@@ -898,53 +952,78 @@ def run(args):
 
     stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
     seen = set()              # dedups within this run
-    records = [] if want_scrapbook else None
     download = not args.scrapbook_only  # scrapbook-only doesn't re-download media
 
-    # Everything (photos AND videos) comes from the activity feed: it's the only
-    # source with a STABLE id per item, so downloads and the scrapbook always
-    # agree on filenames. (The gallery video endpoint returns randomized URLs
-    # that change per request, which can't be matched reliably.)
-    if kids:
-        kinds_filter = {"video"} if args.videos_only else None
+    # No child profiles: fall back to the simple gallery endpoints and stop.
+    if not kids:
         if download:
-            print("Fetching photos & videos from the activity feed...")
-        else:
-            print("Fetching the activity feed...")
-        process_activities(session, base, kids, out_dir, since_dt, stats,
-                            seen=seen, debug=args.debug, overwrite=args.overwrite,
-                            records=records, download=download, kinds_filter=kinds_filter)
-    elif download:
-        # No child profiles: fall back to the simple gallery endpoints.
-        print("  No child profiles found; falling back to the gallery endpoints.")
-        process_simple_feed(session, base, "video", VIDEO_PATH, out_dir, since_dt, stats,
-                            seen=seen, overwrite=args.overwrite)
-        process_simple_feed(session, base, "photo", "parent/photos/", out_dir,
-                            since_dt, stats, seen=seen, overwrite=args.overwrite)
+            print("  No child profiles found; falling back to the gallery endpoints.")
+            process_simple_feed(session, base, "video", VIDEO_PATH, out_dir, since_dt,
+                                stats, seen=seen, overwrite=args.overwrite, until_dt=until_dt)
+            process_simple_feed(session, base, "photo", "parent/photos/", out_dir,
+                                since_dt, stats, seen=seen, overwrite=args.overwrite,
+                                until_dt=until_dt)
+            _print_download_summary(stats, out_dir, since_dt or until_dt)
+        if args.zip:
+            make_zip(out_dir)
+        return
+
+    # Decide how much of the feed to walk. For the interactive class picker we
+    # need the full history (to list every class); otherwise just the range.
+    want_picker = interactive and not args.since and not args.until
+    walk_start = ACTIVITY_EARLIEST_DEFAULT if want_picker else (
+        since_dt.date() if since_dt else ACTIVITY_EARLIEST_DEFAULT)
+    walk_end = date.today() if want_picker else (
+        until_dt.date() if until_dt else date.today())
+
+    print("Reading the activity feed...")
+    all_records = fetch_all_records(session, base, kids, walk_start, walk_end,
+                                    debug=args.debug, out_dir=out_dir)
+
+    # Interactive: let the user pick a class/period (sets the date range).
+    if want_picker:
+        s, u, picked = pick_class(class_spans(all_records))
+        if s:
+            since_dt = datetime.strptime(s, "%Y-%m-%d")
+            until_dt = datetime.strptime(u, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            print(f"Including {picked}: {s} to {u}\n")
+        if picked and not args.class_name:
+            args.class_name = picked
+
+    # Keep only the records in range; that's what we download and scrapbook.
+    selected = [r for r in all_records if in_range(find_capture_dt(r), since_dt, until_dt)]
 
     if download:
-        print("\nDownload summary:")
-        print(f"  Downloaded:        {stats['downloaded']}")
-        print(f"  Skipped (existing):{stats['skipped_exist']:>4}")
-        if since_dt:
-            print(f"  Skipped (too old): {stats['skipped_old']}")
-        print(f"  Failed:            {stats['failed']}")
-        print(f"  Files are in: {out_dir}  (organized by month, e.g. {datetime.now():%Y-%m}/)")
+        kinds_filter = {"video"} if args.videos_only else None
+        print(f"Downloading media from {len(selected)} activities...")
+        download_records(session, selected, out_dir, since_dt, until_dt, stats,
+                         seen=seen, overwrite=args.overwrite, kinds_filter=kinds_filter)
+        _print_download_summary(stats, out_dir, since_dt or until_dt)
 
     if want_scrapbook:
         import scrapbook
-        class_name = args.class_name or scrapbook.detect_class_name(records or [])
+        class_name = args.class_name or scrapbook.detect_class_name(selected)
         with open(feed_path, "w", encoding="utf-8") as fh:
             json.dump({"generated_at": datetime.now().isoformat(),
                        "school": school, "class_name": class_name,
-                       "kids": kids_meta, "activities": records or []},
+                       "kids": kids_meta, "activities": selected},
                       fh, indent=2, default=str)
-        pages = scrapbook.build_scrapbook(records or [], kids_meta, out_dir,
+        pages = scrapbook.build_scrapbook(selected, kids_meta, out_dir,
                                           school=school, class_name=class_name)
         announce_scrapbook(out_dir, pages)
 
     if args.zip:
         make_zip(out_dir)
+
+
+def _print_download_summary(stats, out_dir, ranged):
+    print("\nDownload summary:")
+    print(f"  Downloaded:        {stats['downloaded']}")
+    print(f"  Skipped (existing):{stats['skipped_exist']:>4}")
+    if ranged:
+        print(f"  Skipped (out of range): {stats['skipped_old']}")
+    print(f"  Failed:            {stats['failed']}")
+    print(f"  Files are in: {out_dir}  (organized by month)")
 
 
 if __name__ == "__main__":
