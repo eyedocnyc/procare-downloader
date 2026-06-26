@@ -860,22 +860,46 @@ def guided(args):
     return args
 
 
-def pick_class(spans):
-    """Interactive: show classes/rooms found and let the user pick one.
-    Returns (since_str, until_str, class_name) or (None, None, None) for all."""
-    items = sorted(spans.items(), key=lambda kv: kv[1][0])
-    if len(items) < 2:
-        return None, None, (items[0][0] if items else None)
-    print("Which class/period would you like to include?")
-    for i, (name, (d0, d1, count)) in enumerate(items, 1):
-        print(f"  [{i}] {name}  ({d0} to {d1}, {count} entries)")
-    print("  [0] All history (default)")
-    choice = input("Pick a number then Enter (default 0): ").strip() or "0"
-    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(items):
-        return None, None, None
-    name, (d0, d1, _) = items[int(choice) - 1]
+def _parse_ymd(value):
+    """Parse a YYYY-MM-DD string to a datetime, or None (blank/invalid)."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        print(f"  (couldn't read the date '{value}', ignoring it)")
+        return None
+
+
+def choose_scope(records):
+    """Interactive menu: choose how much to download. Always prompts.
+    Returns (since_dt, until_dt, class_name)."""
+    items = sorted(class_spans(records).items(), key=lambda kv: kv[1][0])
+    print("What would you like to download?")
+    print("  [1] Everything (all available history)   (default)")
+    for i, (name, (d0, d1, _)) in enumerate(items, start=2):
+        print(f'  [{i}] Just "{name}"  ({d0} to {d1})')
+    custom = len(items) + 2
+    print(f"  [{custom}] A custom date range")
+    choice = input("Pick a number then Enter (default 1): ").strip() or "1"
     print()
-    return d0, d1, name
+
+    if choice.isdigit():
+        n = int(choice)
+        if 2 <= n < custom and items:                      # a specific class
+            name, (d0, d1, _) = items[n - 2]
+            return (_parse_ymd(d0),
+                    _parse_ymd(d1).replace(hour=23, minute=59, second=59), name)
+        if n == custom:                                    # custom date range
+            since = _parse_ymd(input("  Start date (YYYY-MM-DD, blank = earliest): "))
+            until = _parse_ymd(input("  Finish date (YYYY-MM-DD, blank = today): "))
+            if until:
+                until = until.replace(hour=23, minute=59, second=59)
+            print()
+            return since, until, None
+    # default: everything (use the single class name for the title if there is one)
+    return None, None, (items[0][0] if len(items) == 1 else None)
 
 
 def main():
@@ -980,15 +1004,15 @@ def run(args):
     all_records = fetch_all_records(session, base, kids, walk_start, walk_end,
                                     debug=args.debug, out_dir=out_dir)
 
-    # Interactive: let the user pick a class/period (sets the date range).
+    # Interactive: ask what date range / class to download.
     if want_picker:
-        s, u, picked = pick_class(class_spans(all_records))
-        if s:
-            since_dt = datetime.strptime(s, "%Y-%m-%d")
-            until_dt = datetime.strptime(u, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            print(f"Including {picked}: {s} to {u}\n")
+        since_dt, until_dt, picked = choose_scope(all_records)
         if picked and not args.class_name:
             args.class_name = picked
+        if since_dt or until_dt:
+            lo = since_dt.strftime("%Y-%m-%d") if since_dt else "the beginning"
+            hi = until_dt.strftime("%Y-%m-%d") if until_dt else "today"
+            print(f"Downloading {lo} to {hi}.\n")
 
     # Keep only the records in range; that's what we download and scrapbook.
     selected = [r for r in all_records if in_range(find_capture_dt(r), since_dt, until_dt)]
