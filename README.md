@@ -8,6 +8,11 @@ and videos) that opens in any web browser.
 Procare gives parents no "download everything" button, and access to a year of memories can
 disappear when a child leaves or a subscription lapses. This tool saves it all, locally.
 
+<p align="center">
+  <img src="docs/preview.png" alt="The scrapbook: a browsable monthly timeline of teacher notes, learning activities, and photos" width="640">
+  <br><em>The generated scrapbook — a browsable monthly timeline (sample data shown).</em>
+</p>
+
 > **Unofficial.** Not affiliated with or endorsed by Procare. It uses the same private API the
 > Procare web/mobile app uses, so it may break if Procare changes their service. Use it only for
 > your **own** child's account. Provided as-is, with no warranty.
