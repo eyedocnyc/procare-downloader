@@ -1,0 +1,53 @@
+name: Build apps
+
+# Run manually from the Actions tab, or automatically when you push a version
+# tag like v1.0 (which also publishes a Release with downloadable files).
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the Release on a tag
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-13 is Intel: the binary runs on Intel Macs natively and on
+        # Apple Silicon via Rosetta (auto-prompted on first launch).
+        os: [macos-13, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pyinstaller requests piexif
+
+      - name: Build the app
+        run: >
+          pyinstaller --onefile --console --name ProcareDownloader
+          --hidden-import scrapbook --hidden-import piexif --noconfirm
+          procare_download.py
+
+      - name: Package into a shareable zip
+        run: python package_app.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProcareDownloader-${{ runner.os }}
+          path: dist/ProcareDownloader-*.zip
+
+      - name: Attach to Release (on version tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ProcareDownloader-*.zip

@@ -1,0 +1,53 @@
+============================================================
+ PROCARE DOWNLOADER  —  READ ME FIRST
+============================================================
+
+This little tool saves ALL of your child's photos and videos from
+Procare onto your computer, and builds a browsable "scrapbook" of
+the whole year — every teacher note, learning activity, photo and
+video — that you can open in any web browser.
+
+
+------------------------------------------------------------
+ HOW TO USE IT  (about 4 steps)
+------------------------------------------------------------
+
+1. INSTALL PYTHON (one time only)
+   - Go to:  https://www.python.org/downloads/
+   - Download and run the installer.
+   - On Windows: tick the box "Add Python to PATH" during install.
+   (If Python is already installed, skip this step.)
+
+2. START THE TOOL
+   - Windows:  double-click   START HERE (Windows).bat
+   - Mac:      double-click   START HERE (Mac).command
+     (On Mac, the first time you may need to right-click it and
+      choose "Open" to get past the security prompt.)
+
+3. CHOOSE AND SIGN IN
+   - Pick option 1 (download everything + build the scrapbook).
+   - Type the email and password you use for Procare.
+     Your password is hidden while typing and is never saved.
+
+4. WAIT, THEN OPEN YOUR SCRAPBOOK
+   - It will download a year of photos/videos — this can take a
+     while the first time. You can leave it running.
+   - When it finishes it opens "Open Scrapbook.html" automatically.
+     You can also find everything in the new "procare_media" folder.
+
+
+------------------------------------------------------------
+ GOOD TO KNOW
+------------------------------------------------------------
+
+- SAFE TO RE-RUN: if it stops partway, just start it again — it
+  skips what you already have and continues.
+
+- KEEP THE FOLDER TOGETHER: the scrapbook pages link to the photo
+  and video files next to them. If you move or share it, move the
+  WHOLE "procare_media" folder (or use the .zip option).
+
+- WHERE THINGS GO: photos and videos are sorted into month folders
+  (e.g. 2025-06). "Open Scrapbook.html" is the front page.
+
+- For more options and troubleshooting, see README.md.

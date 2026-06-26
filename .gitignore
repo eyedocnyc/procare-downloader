@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+dist/
+*.spec
+__pycache__/
+
+# Downloaded media, scrapbook output, and the raw feed (PRIVATE - never commit)
+procare_media/
+old_procare_media/
+procare_media_old/
+feed.json
+debug_activities.json
+*.zip
