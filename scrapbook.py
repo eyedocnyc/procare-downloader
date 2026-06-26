@@ -236,8 +236,14 @@ def month_label(mkey):
     return f"{MONTH_NAMES[int(m)]} {y}"
 
 
-def month_filename(mkey):
-    return f"{mkey} ({month_label(mkey)}).html"
+def month_filename(mkey, prefix=""):
+    return f"{prefix}{mkey} ({month_label(mkey)}).html"
+
+
+def safe_name(name):
+    """Make a string safe to use in a filename."""
+    out = "".join(c for c in str(name) if c.isalnum() or c in " -_'").strip()
+    return out or "Child"
 
 
 def detect_class_name(records):
@@ -254,43 +260,30 @@ def detect_class_name(records):
     return counts.most_common(1)[0][0] if counts else None
 
 
-def build_scrapbook(records, kids_meta, out_dir, school=None, class_name=None):
-    """Write the scrapbook HTML pages. Returns the number of month pages."""
-    os.makedirs(os.path.join(out_dir, "assets"), exist_ok=True)
-    with open(os.path.join(out_dir, "assets", "scrapbook.css"), "w", encoding="utf-8") as fh:
-        fh.write(CSS)
-
-    if not class_name:
-        class_name = detect_class_name(records)
-
-    names = [n for n in (first_name(k) for k in (kids_meta or [])) if n]
-    who = ", ".join(names) if names else "My Child"
+def _build_section(records, out_dir, who, school, class_name, landing_name, prefix=""):
+    """Write the month pages + a landing page for one set of records.
+    Returns the number of month pages written."""
     title = f"{who}'s Year in {class_name}" if class_name else f"{who}'s Scrapbook"
-    # Subtitle context line: School · Class
     context = " · ".join(p for p in (school, class_name) if p)
 
-    # Group: month -> day -> [records], all sorted chronologically.
     by_month = OrderedDict()
     for r in sorted(records, key=lambda r: record_dt(r) or datetime.min):
         dk = day_key(r)
-        mk = dk[:7]
-        by_month.setdefault(mk, OrderedDict()).setdefault(dk, []).append(r)
-
+        by_month.setdefault(dk[:7], OrderedDict()).setdefault(dk, []).append(r)
     months = list(by_month.keys())
 
-    # Month pages.
     for i, mk in enumerate(months):
         days = by_month[mk]
         month_sub = " · ".join(p for p in (who, context) if p)
-        body = [f'<header class="top"><a class="home" href="{href("Open Scrapbook.html")}">'
+        body = [f'<header class="top"><a class="home" href="{href(landing_name)}">'
                 f'&larr; All months</a><h1>{esc(month_label(mk))}</h1>'
                 f'<div class="who">{esc(month_sub)}</div></header>']
         nav = []
         if i > 0:
-            nav.append(f'<a href="{href(month_filename(months[i-1]))}">&larr; '
+            nav.append(f'<a href="{href(month_filename(months[i-1], prefix))}">&larr; '
                        f'{esc(month_label(months[i-1]))}</a>')
         if i < len(months) - 1:
-            nav.append(f'<a href="{href(month_filename(months[i+1]))}">'
+            nav.append(f'<a href="{href(month_filename(months[i+1], prefix))}">'
                        f'{esc(month_label(months[i+1]))} &rarr;</a>')
         if nav:
             body.append(f'<div class="monthnav">{" ".join(nav)}</div>')
@@ -299,14 +292,12 @@ def build_scrapbook(records, kids_meta, out_dir, school=None, class_name=None):
         if nav:
             body.append(f'<div class="monthnav">{" ".join(nav)}</div>')
         page = page_shell(f"{month_label(mk)} — {title}", "\n".join(body))
-        with open(os.path.join(out_dir, month_filename(mk)), "w", encoding="utf-8") as fh:
+        with open(os.path.join(out_dir, month_filename(mk, prefix)), "w", encoding="utf-8") as fh:
             fh.write(page)
 
-    # Landing page.
     rows = []
     for mk in months:
-        days = by_month[mk]
-        recs = [r for d in days.values() for r in d]
+        recs = [r for d in by_month[mk].values() for r in d]
         photos = sum(1 for r in recs if r.get("activity_type") == "photo_activity")
         videos = sum(1 for r in recs if r.get("activity_type") == "video_activity")
         notes = sum(1 for r in recs if r.get("activity_type") == "note_activity")
@@ -314,25 +305,73 @@ def build_scrapbook(records, kids_meta, out_dir, school=None, class_name=None):
             f"{photos} photos" if photos else "",
             f"{videos} videos" if videos else "",
             f"{notes} notes" if notes else "") if s) or f"{len(recs)} entries"
-        rows.append(f'<li><a href="{href(month_filename(mk))}">{esc(month_label(mk))}</a>'
+        rows.append(f'<li><a href="{href(month_filename(mk, prefix))}">{esc(month_label(mk))}</a>'
                     f'<span class="sum">{esc(summary)}</span></li>')
 
-    total = len(records)
     school_line = f'<div class="school">{esc(school)}</div>' if school else ""
     body = f"""<header class="top">
   {school_line}
   <h1>{esc(title)}</h1>
-  <div class="who">A year of memories — {total:,} moments</div>
+  <div class="who">A year of memories — {len(records):,} moments</div>
 </header>
 <ul class="months">
 {chr(10).join(rows)}
 </ul>
 <footer class="foot">Keep this folder together — the pages link to the photos and
 videos inside it. Generated {esc(datetime.now().strftime('%Y-%m-%d'))}.</footer>"""
-    with open(os.path.join(out_dir, "Open Scrapbook.html"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(out_dir, landing_name), "w", encoding="utf-8") as fh:
         fh.write(page_shell(title, body))
-
     return len(months)
+
+
+def build_scrapbook(records, kids_meta, out_dir, school=None, class_name=None):
+    """Write the scrapbook HTML pages. With multiple children, each gets its own
+    set of pages plus a top-level index. Returns the number of month pages."""
+    os.makedirs(os.path.join(out_dir, "assets"), exist_ok=True)
+    with open(os.path.join(out_dir, "assets", "scrapbook.css"), "w", encoding="utf-8") as fh:
+        fh.write(CSS)
+
+    kids = kids_meta or []
+    # Single child (or unknown): one scrapbook at "Open Scrapbook.html".
+    if len(kids) <= 1:
+        who = (first_name(kids[0]) if kids else None) or "My Child"
+        cls = class_name or detect_class_name(records)
+        return _build_section(records, out_dir, who, school, cls, "Open Scrapbook.html")
+
+    # Multiple children: a per-child scrapbook each, plus a master index.
+    total_pages, child_links = 0, []
+    used = set()
+    for kid in kids:
+        kid_id = kid.get("id")
+        who = first_name(kid) or "Child"
+        kid_records = [r for r in records if kid_id in (r.get("kid_ids") or [])]
+        cls = class_name or detect_class_name(kid_records)
+        base = safe_name(who)
+        prefix = base + " - "
+        landing = base + " - Scrapbook.html"
+        if landing in used:  # disambiguate duplicate first names
+            landing = f"{base} ({kid_id[:6]}) - Scrapbook.html"
+            prefix = f"{base} ({kid_id[:6]}) - "
+        used.add(landing)
+        total_pages += _build_section(kid_records, out_dir, who, school, cls, landing, prefix)
+        child_links.append((who, cls, landing, len(kid_records)))
+
+    items = "\n".join(
+        f'<li><a href="{href(landing)}">{esc(who)}</a>'
+        f'<span class="sum">{esc(cls or "")}{" · " if cls else ""}{n:,} moments</span></li>'
+        for who, cls, landing, n in child_links)
+    school_line = f'<div class="school">{esc(school)}</div>' if school else ""
+    body = f"""<header class="top">
+  {school_line}
+  <h1>Procare Scrapbook</h1>
+  <div class="who">Choose a child</div>
+</header>
+<ul class="months">
+{items}
+</ul>"""
+    with open(os.path.join(out_dir, "Open Scrapbook.html"), "w", encoding="utf-8") as fh:
+        fh.write(page_shell("Procare Scrapbook", body))
+    return total_pages
 
 
 CSS = """

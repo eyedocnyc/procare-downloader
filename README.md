@@ -118,6 +118,8 @@ Both call `package_app.py` to assemble the shareable zip.
 - **"Login failed: email or password is incorrect."** Verify at
   [schools.procareconnect.com](https://schools.procareconnect.com/). If you sign in with
   Google/Apple, set a regular Procare password first ("Forgot password").
+- **Two-factor authentication (2FA) / login codes aren't supported.** The tool signs in with
+  just your email and password. If your account requires a verification code, login won't work.
 - **A video won't play.** Re-run with `--overwrite` to refetch it.
 - **Scrapbook shows "media file not found."** Do a normal download first, then `--scrapbook-only`.
 - **From source: `python`/`pip` not recognized.** Python isn't on your PATH — reinstall and tick
