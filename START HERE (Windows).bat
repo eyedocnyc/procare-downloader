@@ -39,14 +39,6 @@ set "choice="
 set /p "choice=Type 1, 2, or 3 then press Enter (default is 1): "
 if not defined choice set "choice=1"
 
-REM Optional school name for the scrapbook (the class/room is detected for you).
-set "SCHOOL_ARG="
-if "%choice%"=="2" goto after_school
-set "school="
-set /p "school=Your school's name for the scrapbook (press Enter to skip): "
-if defined school set SCHOOL_ARG=--school "%school%"
-:after_school
-
 echo.
 echo You'll be asked for your Procare email and password next.
 echo (Your password is hidden as you type and is never saved.)
@@ -55,9 +47,9 @@ echo.
 if "%choice%"=="2" (
   %PYTHON% procare_download.py
 ) else if "%choice%"=="3" (
-  %PYTHON% procare_download.py --scrapbook-only %SCHOOL_ARG%
+  %PYTHON% procare_download.py --scrapbook-only
 ) else (
-  %PYTHON% procare_download.py --scrapbook %SCHOOL_ARG%
+  %PYTHON% procare_download.py --scrapbook
 )
 
 echo.

@@ -37,7 +37,7 @@ Most people should just grab the prebuilt app:
 Then just follow the prompts:
 
 1. Choose **option 1** (download everything + build the scrapbook).
-2. Enter your school's name (optional) and your Procare **email** and **password**.
+2. Enter your Procare **email** and **password**.
 3. It downloads your media (the first run can take a while) and opens your scrapbook when done.
 
 Everything is saved next to the app in a `procare_media` folder. Open **`Open Scrapbook.html`** to
@@ -89,7 +89,7 @@ python procare_download.py --scrapbook
 | `--scrapbook` | Build the HTML scrapbook after downloading |
 | `--scrapbook-only` | Rebuild the scrapbook without re-downloading (uses `feed.json`) |
 | `--zip` | Bundle the whole output folder into one `.zip` |
-| `--school "Name"` | School name shown on the scrapbook (auto-detected if omitted) |
+| `--school "Name"` | Optional school name to show on the scrapbook (omitted by default) |
 | `--class-name "Name"` | Class/room name (auto-detected from the feed if omitted) |
 | `--since YYYY-MM-DD` | Only include media on/after this date |
 | `--until YYYY-MM-DD` | Only include media on/before this date |

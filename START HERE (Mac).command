@@ -35,13 +35,6 @@ echo
 read -p "Type 1, 2, or 3 then press Enter (default is 1): " choice
 choice=${choice:-1}
 
-# Optional school name for the scrapbook (the class/room is detected for you).
-SCHOOL_ARG=()
-if [ "$choice" != "2" ]; then
-  read -p "Your school's name for the scrapbook (press Enter to skip): " school
-  [ -n "$school" ] && SCHOOL_ARG=(--school "$school")
-fi
-
 echo
 echo "You'll be asked for your Procare email and password next."
 echo "(Your password is hidden as you type and is never saved.)"
@@ -50,9 +43,9 @@ echo
 if [ "$choice" = "2" ]; then
   $PYTHON procare_download.py
 elif [ "$choice" = "3" ]; then
-  $PYTHON procare_download.py --scrapbook-only "${SCHOOL_ARG[@]}"
+  $PYTHON procare_download.py --scrapbook-only
 else
-  $PYTHON procare_download.py --scrapbook "${SCHOOL_ARG[@]}"
+  $PYTHON procare_download.py --scrapbook
 fi
 
 echo

@@ -131,42 +131,6 @@ def authenticate(session, email, password):
     sys.exit(f"Authentication failed. Last error:\n  {last_error}")
 
 
-def find_school_name(obj, _depth=0):
-    """Best-effort: dig a school name out of the login `user` payload."""
-    if _depth > 4 or not isinstance(obj, dict):
-        return None
-    # Any key mentioning "school": a name string, a {name:...}, or a [{name:...}].
-    for key, val in obj.items():
-        kl = str(key).lower()
-        if "school" not in kl:
-            continue
-        if isinstance(val, str):
-            if "name" in kl and val.strip():   # school_name / current_school_name
-                return val.strip()
-        elif isinstance(val, dict):
-            nm = val.get("name")
-            if isinstance(nm, str) and nm.strip():
-                return nm.strip()
-        elif isinstance(val, list):
-            for item in val:
-                if isinstance(item, dict) and isinstance(item.get("name"), str) \
-                        and item["name"].strip():
-                    return item["name"].strip()
-    # Recurse a little for deeper/nested shapes.
-    for val in obj.values():
-        if isinstance(val, dict):
-            found = find_school_name(val, _depth + 1)
-            if found:
-                return found
-        elif isinstance(val, list):
-            for item in val:
-                if isinstance(item, dict):
-                    found = find_school_name(item, _depth + 1)
-                    if found:
-                        return found
-    return None
-
-
 # --------------------------------------------------------------------------- #
 # Field extraction (defensive against API drift)
 # --------------------------------------------------------------------------- #
@@ -711,9 +675,9 @@ def fetch_all_records(session, base, kids, start_date, end_date,
                 page += 1
                 time.sleep(POLITE_DELAY)
 
-    if type_counts:
+    if debug and type_counts:
         summary = ", ".join(f"{t}:{c}" for t, c in sorted(type_counts.items()))
-        print(f"  Activity types seen: {summary}")
+        print(f"  [debug] Activity types seen: {summary}")
     if debug and out_dir and type_samples:
         dump_path = os.path.join(out_dir, "debug_activities.json")
         try:
@@ -852,10 +816,6 @@ def guided(args):
         args.scrapbook_only = True
     else:
         args.scrapbook = True
-    if choice != "2":
-        s = input("Your school's name for the scrapbook (press Enter to skip): ").strip()
-        if s:
-            args.school = s
     print()
     return args
 
@@ -966,9 +926,9 @@ def run(args):
     session.headers.update({"User-Agent": "procare-media-downloader/1.0"})
 
     print("Logging in...")
-    base, user = authenticate(session, email, password)
+    base, _ = authenticate(session, email, password)
     print(f"Authenticated. Saving to: {out_dir}\n")
-    school = args.school or find_school_name(user)
+    school = args.school  # shown only if explicitly provided; not auto-detected
 
     kids_meta = get_kids_meta(session, base)
     kids = [k["id"] for k in kids_meta]
@@ -1000,7 +960,8 @@ def run(args):
     walk_end = date.today() if want_picker else (
         until_dt.date() if until_dt else date.today())
 
-    print("Reading the activity feed...")
+    print("Reading the activity feed — this can take a minute or two for a full year,")
+    print("please wait (it isn't frozen)...")
     all_records = fetch_all_records(session, base, kids, walk_start, walk_end,
                                     debug=args.debug, out_dir=out_dir)
 
