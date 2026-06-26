@@ -1,0 +1,7 @@
+# Shell scripts must stay LF or they break on macOS/Linux (bad interpreter).
+*.command text eol=lf
+*.sh      text eol=lf
+# Windows batch files should be CRLF.
+*.bat     text eol=crlf
+# Python: normalize to LF (works everywhere).
+*.py      text eol=lf
