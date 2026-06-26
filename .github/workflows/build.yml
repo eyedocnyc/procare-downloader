@@ -17,9 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 is Intel: the binary runs on Intel Macs natively and on
-        # Apple Silicon via Rosetta (auto-prompted on first launch).
-        os: [macos-13, windows-latest]
+        # macos-latest is Apple Silicon (M-series): fast, reliable runners.
+        # The binary runs on Apple Silicon Macs (2020+); not Intel Macs.
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

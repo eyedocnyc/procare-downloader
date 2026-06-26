@@ -25,8 +25,9 @@ Most people should just grab the prebuilt app:
 
 - **Windows:** download `ProcareDownloader-Windows.zip`, unzip, double-click `ProcareDownloader.exe`.
   First launch shows *"Windows protected your PC"* (the app is unsigned) → **More info → Run anyway**.
-- **Mac:** download `ProcareDownloader-Mac.zip`, unzip, double-click `ProcareDownloader`.
-  First launch is blocked by Gatekeeper → **right-click → Open → Open** (one time only).
+- **Mac (Apple Silicon, 2020+):** download `ProcareDownloader-Mac.zip`, unzip, double-click
+  `ProcareDownloader`. First launch is blocked by Gatekeeper → **right-click → Open → Open**
+  (one time only). *(Older Intel Macs aren't supported by the prebuilt app — run from source instead.)*
 
 Then just follow the prompts:
 
@@ -99,8 +100,7 @@ Running with **no arguments** (or double-clicking the app) starts a friendly gui
 
 Prebuilt apps are produced automatically by [GitHub Actions](.github/workflows/build.yml): pushing
 a version tag (`git tag v1.1 && git push origin v1.1`) builds the Windows and Mac apps and
-publishes them to a **Release**. The Mac binary is built on Intel so it runs on Intel Macs natively
-and on Apple Silicon via Rosetta.
+publishes them to a **Release**. The Mac binary is built for Apple Silicon (M-series, 2020+).
 
 To build locally instead:
 
