@@ -132,6 +132,24 @@ Both call `package_app.py` to assemble the shareable zip.
 - The apps are unsigned, hence the one-time SmartScreen/Gatekeeper prompts. Code signing requires
   paid developer certificates and isn't worth it for a personal tool.
 
+## Disclaimer
+
+- This project is **not affiliated with, endorsed by, sponsored by, or connected to Procare
+  Solutions** or any of its products. "Procare" and any related names or logos are trademarks of
+  their respective owners and are used here only to describe what the tool interacts with.
+- It is an **independent, unofficial** tool that uses Procare's private API the same way the
+  official app does. There is no guarantee it will keep working; Procare may change or block it
+  at any time.
+- It is intended for **personal use only** — to let a parent or guardian save and keep a copy of
+  **their own child's** photos, videos, and activity records that they already have access to.
+  Do not use it to access any account or data that isn't yours, and don't use it for commercial
+  purposes.
+- You are responsible for using it in compliance with Procare's Terms of Service and any
+  applicable laws. Handle the downloaded files and your credentials responsibly.
+- Provided **"as is", without warranty of any kind**, express or implied. The authors and
+  contributors accept **no liability** for any loss, damage, or other consequences arising from
+  its use. Use at your own risk.
+
 ## License
 
-Provided as-is for personal use, with no warranty. Not affiliated with Procare Solutions.
+Provided as-is for personal use. See the Disclaimer above. Not affiliated with Procare Solutions.
