@@ -883,13 +883,17 @@ def main():
 def run(args):
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
-    feed_path = os.path.join(out_dir, "feed.json")
+    # feed.json lives inside the Scrapbook folder to keep the root tidy; also
+    # look in the old root location for backward compatibility.
+    feed_path = os.path.join(out_dir, "Scrapbook", "feed.json")
+    legacy_feed = os.path.join(out_dir, "feed.json")
+    read_feed = feed_path if os.path.exists(feed_path) else legacy_feed
     want_scrapbook = args.scrapbook or args.scrapbook_only
 
     # Fast path: rebuild the scrapbook from a saved feed.json with no login.
-    if args.scrapbook_only and os.path.exists(feed_path):
+    if args.scrapbook_only and os.path.exists(read_feed):
         print("Rebuilding scrapbook from existing feed.json (no login needed)...")
-        with open(feed_path, encoding="utf-8") as fh:
+        with open(read_feed, encoding="utf-8") as fh:
             data = json.load(fh)
         import scrapbook
         sections = data.get("sections")
@@ -1008,19 +1012,20 @@ def run(args):
     if download:
         kinds_filter = {"video"} if args.videos_only else None
         for s in sections:
-            root = os.path.join(out_dir, s["folder"]) if s["folder"] else out_dir
-            os.makedirs(root, exist_ok=True)
+            m_dir = scrapbook.media_root(out_dir, s["folder"])
+            os.makedirs(m_dir, exist_ok=True)
             if multi:
                 print(f"\nDownloading {s['name']}'s media — {len(s['records'])} activities...")
             else:
                 print(f"Downloading media from {len(s['records'])} activities...")
             # Fresh dedup set per child so shared media lands in each child's folder.
-            download_records(session, s["records"], root, s["since"], s["until"], stats,
+            download_records(session, s["records"], m_dir, s["since"], s["until"], stats,
                              seen=set(), overwrite=args.overwrite, kinds_filter=kinds_filter)
         ranged = any(s["since"] or s["until"] for s in sections)
         _print_download_summary(stats, out_dir, ranged)
 
     if want_scrapbook:
+        os.makedirs(os.path.dirname(feed_path), exist_ok=True)
         with open(feed_path, "w", encoding="utf-8") as fh:
             json.dump({"generated_at": datetime.now().isoformat(), "school": school,
                        "sections": [{"name": s["name"], "class_name": s["class_name"],

@@ -57,18 +57,16 @@ browse it.
 
 ```
 procare_media/
-  Open Scrapbook.html              <- open this
-  2025-06 (June 2025).html         <- one page per month
-  2025-06/                         <- that month's photos & videos
-  assets/scrapbook.css
-  feed.json                        <- raw archive of the full activity feed
+  Open Scrapbook.html    <- open this (the only page at the top level)
+  Scrapbook/             <- the month-by-month pages (+ styling, feed.json)
+  Media/                 <- all photos & videos, organized by month (YYYY-MM/)
 ```
 
 **Multiple classes/years?** When run interactively, the app lists the classes it finds (with date
 ranges) and lets you pick one — handy for making a scrapbook for a single class or school year.
 
-**More than one child?** Each child gets their **own** date-range choice, their own class name, and
-their own subfolder (`procare_media/<Child>/…` with media inside it). A top-level `Open Scrapbook.html`
+**More than one child?** Each child gets their **own** date-range choice and class name, with their
+media under `Media/<Child>/` and pages under `Scrapbook/<Child>/`. The top-level `Open Scrapbook.html`
 lets you pick which child to open.
 
 ---
