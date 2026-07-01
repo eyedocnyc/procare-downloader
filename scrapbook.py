@@ -160,16 +160,17 @@ def content_text(record):
 # --------------------------------------------------------------------------- #
 # Media
 # --------------------------------------------------------------------------- #
-def media_html(record, out_dir):
-    """Inline <img>/<video> for any media attached to this activity."""
+def media_html(record, root):
+    """Inline <img>/<video> for any media attached to this activity.
+    `root` is the folder the HTML page lives in (media is under root/YYYY-MM)."""
     pieces = []
     for url, dt, ident, kind in pd.collect_media_entries(record):
-        path = pd.find_local_media(out_dir, dt, kind, ident)
+        path = pd.find_local_media(root, dt, kind, ident)
         if not path:
             pieces.append('<div class="missing">media file not found '
                           '(re-run the downloader to fetch it)</div>')
             continue
-        rel = href(os.path.relpath(path, out_dir).replace(os.sep, "/"))
+        rel = href(os.path.relpath(path, root).replace(os.sep, "/"))
         if kind == "video":
             pieces.append(f'<video class="media" controls preload="none" '
                           f'src="{rel}"></video>')
@@ -181,13 +182,13 @@ def media_html(record, out_dir):
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
-def render_card(record, out_dir):
+def render_card(record, root):
     atype = record.get("activity_type", "unknown")
     emoji, label = TYPE_META.get(atype, ("•", atype.replace("_", " ").title()))
     dt = record_dt(record)
     staff = record.get("staff_present_name") or ""
     body = content_text(record)
-    media = media_html(record, out_dir)
+    media = media_html(record, root)
     meta = " · ".join(p for p in (fmt_time(dt), esc(staff)) if p)
     return f"""<div class="card">
   <div class="card-head"><span class="badge">{emoji} {esc(label)}</span>
@@ -197,7 +198,7 @@ def render_card(record, out_dir):
 </div>"""
 
 
-def render_day(dkey, records, out_dir):
+def render_day(dkey, records, root):
     dt = pd.find_capture_dt({"t": dkey})
     heading = f"{dt.strftime('%A')}, {MONTH_NAMES[dt.month]} {dt.day}, {dt.year}" if dt else dkey
 
@@ -211,7 +212,7 @@ def render_day(dkey, records, out_dir):
                           for r in sorted(routine, key=lambda r: record_dt(r) or datetime.min))
         parts.append(f'<div class="daily-log"><span class="dl-label">Daily log</span>{badges}</div>')
     for r in content:
-        parts.append(render_card(r, out_dir))
+        parts.append(render_card(r, root))
     parts.append("</section>")
     return "\n".join(parts)
 
@@ -260,9 +261,16 @@ def detect_class_name(records):
     return counts.most_common(1)[0][0] if counts else None
 
 
-def _build_section(records, out_dir, who, school, class_name, landing_name, prefix=""):
-    """Write the month pages + a landing page for one set of records.
-    Returns the number of month pages written."""
+def write_css(root):
+    os.makedirs(os.path.join(root, "assets"), exist_ok=True)
+    with open(os.path.join(root, "assets", "scrapbook.css"), "w", encoding="utf-8") as fh:
+        fh.write(CSS)
+
+
+def _build_section(records, root, who, school, class_name, landing_name="Open Scrapbook.html"):
+    """Write the month pages + landing page for one child into `root` (its own
+    self-contained folder, with media under root/YYYY-MM). Returns page count."""
+    write_css(root)
     title = f"{who}'s Year in {class_name}" if class_name else f"{who}'s Scrapbook"
     context = " · ".join(p for p in (school, class_name) if p)
 
@@ -280,19 +288,19 @@ def _build_section(records, out_dir, who, school, class_name, landing_name, pref
                 f'<div class="who">{esc(month_sub)}</div></header>']
         nav = []
         if i > 0:
-            nav.append(f'<a href="{href(month_filename(months[i-1], prefix))}">&larr; '
+            nav.append(f'<a href="{href(month_filename(months[i-1]))}">&larr; '
                        f'{esc(month_label(months[i-1]))}</a>')
         if i < len(months) - 1:
-            nav.append(f'<a href="{href(month_filename(months[i+1], prefix))}">'
+            nav.append(f'<a href="{href(month_filename(months[i+1]))}">'
                        f'{esc(month_label(months[i+1]))} &rarr;</a>')
         if nav:
             body.append(f'<div class="monthnav">{" ".join(nav)}</div>')
         for dk in days:
-            body.append(render_day(dk, days[dk], out_dir))
+            body.append(render_day(dk, days[dk], root))
         if nav:
             body.append(f'<div class="monthnav">{" ".join(nav)}</div>')
         page = page_shell(f"{month_label(mk)} — {title}", "\n".join(body))
-        with open(os.path.join(out_dir, month_filename(mk, prefix)), "w", encoding="utf-8") as fh:
+        with open(os.path.join(root, month_filename(mk)), "w", encoding="utf-8") as fh:
             fh.write(page)
 
     rows = []
@@ -305,7 +313,7 @@ def _build_section(records, out_dir, who, school, class_name, landing_name, pref
             f"{photos} photos" if photos else "",
             f"{videos} videos" if videos else "",
             f"{notes} notes" if notes else "") if s) or f"{len(recs)} entries"
-        rows.append(f'<li><a href="{href(month_filename(mk, prefix))}">{esc(month_label(mk))}</a>'
+        rows.append(f'<li><a href="{href(month_filename(mk))}">{esc(month_label(mk))}</a>'
                     f'<span class="sum">{esc(summary)}</span></li>')
 
     school_line = f'<div class="school">{esc(school)}</div>' if school else ""
@@ -319,47 +327,47 @@ def _build_section(records, out_dir, who, school, class_name, landing_name, pref
 </ul>
 <footer class="foot">Keep this folder together — the pages link to the photos and
 videos inside it. Generated {esc(datetime.now().strftime('%Y-%m-%d'))}.</footer>"""
-    with open(os.path.join(out_dir, landing_name), "w", encoding="utf-8") as fh:
+    with open(os.path.join(root, landing_name), "w", encoding="utf-8") as fh:
         fh.write(page_shell(title, body))
     return len(months)
 
 
-def build_scrapbook(records, kids_meta, out_dir, school=None, class_name=None):
-    """Write the scrapbook HTML pages. With multiple children, each gets its own
-    set of pages plus a top-level index. Returns the number of month pages."""
-    os.makedirs(os.path.join(out_dir, "assets"), exist_ok=True)
-    with open(os.path.join(out_dir, "assets", "scrapbook.css"), "w", encoding="utf-8") as fh:
-        fh.write(CSS)
+def build_scrapbook(sections, out_dir, school=None):
+    """Render the scrapbook from prepared `sections`.
 
-    kids = kids_meta or []
-    # Single child (or unknown): one scrapbook at "Open Scrapbook.html".
-    if len(kids) <= 1:
-        who = (first_name(kids[0]) if kids else None) or "My Child"
-        cls = class_name or detect_class_name(records)
-        return _build_section(records, out_dir, who, school, cls, "Open Scrapbook.html")
+    Each section is a dict: {name, class_name, folder, records}. `folder` is ""
+    for a single child (everything at out_dir) or a subfolder name per child.
+    Returns the total number of month pages written.
+    """
+    sections = [s for s in sections if s.get("records")]
+    if not sections:
+        write_css(out_dir)
+        with open(os.path.join(out_dir, "Open Scrapbook.html"), "w", encoding="utf-8") as fh:
+            fh.write(page_shell("Procare Scrapbook",
+                                '<header class="top"><h1>Procare Scrapbook</h1>'
+                                '<div class="who">No activities found in the selected range.</div>'
+                                '</header>'))
+        return 0
 
-    # Multiple children: a per-child scrapbook each, plus a master index.
-    total_pages, child_links = 0, []
-    used = set()
-    for kid in kids:
-        kid_id = kid.get("id")
-        who = first_name(kid) or "Child"
-        kid_records = [r for r in records if kid_id in (r.get("kid_ids") or [])]
-        cls = class_name or detect_class_name(kid_records)
-        base = safe_name(who)
-        prefix = base + " - "
-        landing = base + " - Scrapbook.html"
-        if landing in used:  # disambiguate duplicate first names
-            landing = f"{base} ({kid_id[:6]}) - Scrapbook.html"
-            prefix = f"{base} ({kid_id[:6]}) - "
-        used.add(landing)
-        total_pages += _build_section(kid_records, out_dir, who, school, cls, landing, prefix)
-        child_links.append((who, cls, landing, len(kid_records)))
+    # Single child: one scrapbook right at out_dir.
+    if len(sections) == 1 and not sections[0].get("folder"):
+        s = sections[0]
+        return _build_section(s["records"], out_dir, s["name"], school, s.get("class_name"))
 
+    # Multiple children: a self-contained folder per child + a master index.
+    total, links = 0, []
+    for s in sections:
+        root = os.path.join(out_dir, s["folder"]) if s.get("folder") else out_dir
+        os.makedirs(root, exist_ok=True)
+        total += _build_section(s["records"], root, s["name"], school, s.get("class_name"))
+        landing_rel = f'{s["folder"]}/Open Scrapbook.html' if s.get("folder") else "Open Scrapbook.html"
+        links.append((s["name"], s.get("class_name"), landing_rel, len(s["records"])))
+
+    write_css(out_dir)
     items = "\n".join(
-        f'<li><a href="{href(landing)}">{esc(who)}</a>'
+        f'<li><a href="{href(rel)}">{esc(name)}</a>'
         f'<span class="sum">{esc(cls or "")}{" · " if cls else ""}{n:,} moments</span></li>'
-        for who, cls, landing, n in child_links)
+        for name, cls, rel, n in links)
     school_line = f'<div class="school">{esc(school)}</div>' if school else ""
     body = f"""<header class="top">
   {school_line}
@@ -371,7 +379,7 @@ def build_scrapbook(records, kids_meta, out_dir, school=None, class_name=None):
 </ul>"""
     with open(os.path.join(out_dir, "Open Scrapbook.html"), "w", encoding="utf-8") as fh:
         fh.write(page_shell("Procare Scrapbook", body))
-    return total_pages
+    return total
 
 
 CSS = """

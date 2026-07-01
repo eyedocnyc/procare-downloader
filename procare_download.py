@@ -892,10 +892,14 @@ def run(args):
         with open(feed_path, encoding="utf-8") as fh:
             data = json.load(fh)
         import scrapbook
-        pages = scrapbook.build_scrapbook(
-            data.get("activities", []), data.get("kids", []), out_dir,
-            school=args.school or data.get("school"),
-            class_name=args.class_name or data.get("class_name"))
+        sections = data.get("sections")
+        if sections is None:  # legacy feed.json (single merged scrapbook)
+            kids = data.get("kids") or []
+            who = ", ".join(n for n in (scrapbook.first_name(k) for k in kids) if n) or "My Child"
+            sections = [{"name": who, "class_name": args.class_name or data.get("class_name"),
+                         "folder": "", "records": data.get("activities", [])}]
+        pages = scrapbook.build_scrapbook(sections, out_dir,
+                                          school=args.school or data.get("school"))
         announce_scrapbook(out_dir, pages)
         if args.zip:
             make_zip(out_dir)
@@ -965,36 +969,68 @@ def run(args):
     all_records = fetch_all_records(session, base, kids, walk_start, walk_end,
                                     debug=args.debug, out_dir=out_dir)
 
-    # Interactive: ask what date range / class to download.
-    if want_picker:
-        since_dt, until_dt, picked = choose_scope(all_records)
-        if picked and not args.class_name:
-            args.class_name = picked
-        if since_dt or until_dt:
-            lo = since_dt.strftime("%Y-%m-%d") if since_dt else "the beginning"
-            hi = until_dt.strftime("%Y-%m-%d") if until_dt else "today"
-            print(f"Downloading {lo} to {hi}.\n")
+    import scrapbook
 
-    # Keep only the records in range; that's what we download and scrapbook.
-    selected = [r for r in all_records if in_range(find_capture_dt(r), since_dt, until_dt)]
+    # Build one "section" per child. Each child gets its own date-range choice,
+    # its own class name, and (when there are siblings) its own media subfolder.
+    multi = len(kids_meta) > 1
+    sections, used_folders = [], set()
+    for kid in kids_meta:
+        kid_id = kid.get("id")
+        who = scrapbook.first_name(kid) or "My Child"
+        kid_records = ([r for r in all_records if kid_id in (r.get("kid_ids") or [])]
+                       if multi else all_records)
+
+        c_since, c_until = since_dt, until_dt
+        picked = None
+        if want_picker:
+            if multi:
+                print(f"\n--- {who} ---")
+            c_since, c_until, picked = choose_scope(kid_records)
+            if c_since or c_until:
+                lo = c_since.strftime("%Y-%m-%d") if c_since else "the beginning"
+                hi = c_until.strftime("%Y-%m-%d") if c_until else "today"
+                print(f"{who}: {lo} to {hi}\n")
+
+        sel = [r for r in kid_records if in_range(find_capture_dt(r), c_since, c_until)]
+        cls = args.class_name or picked or scrapbook.detect_class_name(sel)
+
+        folder = ""
+        if multi:
+            folder = scrapbook.safe_name(who)
+            if folder in used_folders:
+                folder = f"{folder} ({kid_id[:6]})" if kid_id else f"{folder} (2)"
+            used_folders.add(folder)
+
+        sections.append({"name": who, "class_name": cls, "folder": folder,
+                         "records": sel, "since": c_since, "until": c_until})
 
     if download:
         kinds_filter = {"video"} if args.videos_only else None
-        print(f"Downloading media from {len(selected)} activities...")
-        download_records(session, selected, out_dir, since_dt, until_dt, stats,
-                         seen=seen, overwrite=args.overwrite, kinds_filter=kinds_filter)
-        _print_download_summary(stats, out_dir, since_dt or until_dt)
+        for s in sections:
+            root = os.path.join(out_dir, s["folder"]) if s["folder"] else out_dir
+            os.makedirs(root, exist_ok=True)
+            if multi:
+                print(f"\nDownloading {s['name']}'s media — {len(s['records'])} activities...")
+            else:
+                print(f"Downloading media from {len(s['records'])} activities...")
+            # Fresh dedup set per child so shared media lands in each child's folder.
+            download_records(session, s["records"], root, s["since"], s["until"], stats,
+                             seen=set(), overwrite=args.overwrite, kinds_filter=kinds_filter)
+        ranged = any(s["since"] or s["until"] for s in sections)
+        _print_download_summary(stats, out_dir, ranged)
 
     if want_scrapbook:
-        import scrapbook
-        class_name = args.class_name or scrapbook.detect_class_name(selected)
         with open(feed_path, "w", encoding="utf-8") as fh:
-            json.dump({"generated_at": datetime.now().isoformat(),
-                       "school": school, "class_name": class_name,
-                       "kids": kids_meta, "activities": selected},
+            json.dump({"generated_at": datetime.now().isoformat(), "school": school,
+                       "sections": [{"name": s["name"], "class_name": s["class_name"],
+                                     "folder": s["folder"], "records": s["records"]}
+                                    for s in sections]},
                       fh, indent=2, default=str)
-        pages = scrapbook.build_scrapbook(selected, kids_meta, out_dir,
-                                          school=school, class_name=class_name)
+        pages = scrapbook.build_scrapbook(
+            [{"name": s["name"], "class_name": s["class_name"],
+              "folder": s["folder"], "records": s["records"]} for s in sections],
+            out_dir, school=school)
         announce_scrapbook(out_dir, pages)
 
     if args.zip:

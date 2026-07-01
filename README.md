@@ -67,6 +67,10 @@ procare_media/
 **Multiple classes/years?** When run interactively, the app lists the classes it finds (with date
 ranges) and lets you pick one — handy for making a scrapbook for a single class or school year.
 
+**More than one child?** Each child gets their **own** date-range choice, their own class name, and
+their own subfolder (`procare_media/<Child>/…` with media inside it). A top-level `Open Scrapbook.html`
+lets you pick which child to open.
+
 ---
 
 ## Run from source (advanced)
