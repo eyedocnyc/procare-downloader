@@ -8,6 +8,7 @@ Each contains the standalone app plus a quick-start README. Used by both the
 local build scripts and the GitHub Actions workflow so every channel ships the
 same thing.
 """
+import hashlib
 import os
 import platform
 import shutil
@@ -103,6 +104,16 @@ def main():
     archive = shutil.make_archive(stage, "zip", root_dir=DIST,
                                   base_dir=f"ProcareDownloader-{OSNAME}")
     print(f"Created: {archive}  ({os.path.getsize(archive)/1_048_576:.0f} MB)")
+
+    # SHA-256 checksum so downloads can be verified (the apps are unsigned).
+    h = hashlib.sha256()
+    with open(archive, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    with open(archive + ".sha256", "w", encoding="utf-8") as fh:
+        fh.write(f"{digest}  {os.path.basename(archive)}\n")
+    print(f"SHA-256: {digest}")
 
 
 if __name__ == "__main__":

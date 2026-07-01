@@ -235,6 +235,21 @@ def render_day(dkey, records, media_dir, pages_dir):
     return "\n".join(parts)
 
 
+# Click a photo to view it full-screen; click anywhere or press Esc to close.
+LIGHTBOX = """<div id="lightbox" class="lightbox"><img alt=""></div>
+<script>
+(function(){
+  var lb=document.getElementById('lightbox'), img=lb.firstElementChild;
+  document.addEventListener('click',function(e){
+    var t=e.target;
+    if(t.tagName==='IMG'&&t.classList.contains('media')){img.src=t.src;lb.classList.add('on');}
+    else if(lb.classList.contains('on')){lb.classList.remove('on');}
+  });
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on');});
+})();
+</script>"""
+
+
 def page_shell(title, body, css_rel="assets/scrapbook.css"):
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -246,6 +261,7 @@ def page_shell(title, body, css_rel="assets/scrapbook.css"):
 </head>
 <body>
 {body}
+{LIGHTBOX}
 </body>
 </html>"""
 
@@ -277,6 +293,44 @@ def detect_class_name(records):
         if isinstance(sec, dict) and isinstance(sec.get("name"), str) and sec["name"].strip():
             counts[sec["name"].strip()] += 1
     return counts.most_common(1)[0][0] if counts else None
+
+
+def _pretty_day(dk):
+    try:
+        y, m, d = dk.split("-")
+        return f"{MONTH_NAMES[int(m)]} {int(d)}, {y}"
+    except Exception:
+        return dk
+
+
+def section_stats(records):
+    """Counts + span + busiest month for a set of records (for the landing page)."""
+    counts = {"photo_activity": 0, "video_activity": 0, "note_activity": 0, "learning_activity": 0}
+    days, per_month = set(), {}
+    for r in records:
+        counts[r.get("activity_type")] = counts.get(r.get("activity_type"), 0) + 1
+        dk = day_key(r)
+        if dk and dk != "unknown":
+            days.add(dk)
+            per_month[dk[:7]] = per_month.get(dk[:7], 0) + 1
+    span = f"{_pretty_day(min(days))} – {_pretty_day(max(days))}" if days else ""
+    busiest = month_label(max(per_month, key=per_month.get)) if per_month else ""
+    return {"photos": counts.get("photo_activity", 0), "videos": counts.get("video_activity", 0),
+            "notes": counts.get("note_activity", 0), "learning": counts.get("learning_activity", 0),
+            "days": len(days), "span": span, "busiest": busiest}
+
+
+def stats_html(records):
+    st = section_stats(records)
+    pills = []
+    for value, label in ((st["photos"], "photos"), (st["videos"], "videos"),
+                         (st["notes"], "notes"), (st["learning"], "learning activities"),
+                         (st["days"], "days")):
+        if value:
+            pills.append(f'<span class="stat"><b>{value:,}</b> {label}</span>')
+    sub = " · ".join(p for p in (st["span"], f"busiest month: {st['busiest']}" if st["busiest"] else "") if p)
+    return (f'<div class="stats">{"".join(pills)}</div>'
+            + (f'<div class="statsub">{esc(sub)}</div>' if sub else ""))
 
 
 def write_css(root):
@@ -345,6 +399,7 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
   {school_line}
   <h1>{esc(title)}</h1>
   <div class="who">A year of memories — {len(records):,} moments</div>
+  {stats_html(records)}
 </header>
 <ul class="months">
 {chr(10).join(rows)}
@@ -460,9 +515,20 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .card p{margin:.5em 0;}
 .media{display:block;width:100%;max-width:640px;height:auto;border-radius:10px;
   margin:10px 0;background:#000;}
+img.media{cursor:zoom-in;}
 .missing{color:#b00;background:#fff3f3;border:1px solid #f3d0d0;border-radius:8px;
   padding:8px 10px;font-size:.85rem;}
 .foot{max-width:820px;margin:40px auto;padding:16px 20px;color:var(--muted);
   font-size:.85rem;border-top:1px solid var(--line);}
+.stats{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 4px;}
+.stat{background:var(--chip);border-radius:20px;padding:4px 12px;font-size:.85rem;
+  color:#5c554b;}
+.stat b{color:var(--accent);}
+.statsub{color:var(--muted);font-size:.85rem;margin-bottom:4px;}
+.lightbox{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.86);
+  align-items:center;justify-content:center;cursor:zoom-out;padding:18px;}
+.lightbox.on{display:flex;}
+.lightbox img{max-width:96vw;max-height:96vh;border-radius:8px;
+  box-shadow:0 8px 48px rgba(0,0,0,.55);}
 @media(max-width:560px){.top h1{font-size:1.5rem}.meta{font-size:.78rem}}
 """

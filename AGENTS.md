@@ -1,4 +1,4 @@
-# CLAUDE.md — project notes for the Procare Downloader
+# AGENTS.md — project notes for the Procare Downloader
 
 Guidance for working in this repo. Read this before changing behavior; it captures
 hard-won details about Procare's private API and the design decisions that fix real bugs.
@@ -69,20 +69,7 @@ Multiple children: each gets `Scrapbook/<Child>/` and `Media/<Child>/`; the root
 is a "choose a child" index. The engine builds one **section per child**
 (`{name, class_name, folder, records}`); `scrapbook.media_root`/`pages_root` define the folders and are
 shared by the download path and the renderer so filenames always agree
-(`media_stem` / `find_local_media`). Landing pages show a summary (`stats_html`); every page includes a
-photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use real relative paths
-(`rel_href`).
-
-## Security / privacy
-
-- `feed.json` is passed through `scrub_signed_urls` before writing — signed/expiring CDN query
-  strings (`Signature=`, `Expires=`, `X-Amz-`, `Key-Pair-Id=`, `token=`) are stripped so a shared
-  archive can't hand out working links to the media. The local-file lookup still works because
-  `id_from_url` ignores the query.
-- `fetch_json` re-authenticates once on 401/403 via the `reauth` closure (guards long feed walks
-  if the token expires). Media downloads use signed URLs and aren't affected.
-- Releases include per-zip **SHA-256** files: `package_app.py` writes `*.zip.sha256`; the workflow
-  attaches them. Apps are unsigned (paid certs not worth it) — that's the trust mechanism.
+(`media_stem` / `find_local_media`).
 
 ## Behavior notes
 

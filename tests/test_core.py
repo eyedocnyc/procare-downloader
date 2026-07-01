@@ -179,6 +179,35 @@ def test_layout_multi_child_isolated():
     assert src and "Media/Maya/" in src and link_resolves(mpath, src)
 
 
+def test_scrub_signed_urls():
+    rec = {"activiable": {"id": "p1",
+           "main_url": "https://cdn/photos/files/p1/main/p1.jpg?Expires=99&Signature=SECRET&Key-Pair-Id=K"},
+           "plain": "https://cdn/x/y.jpg", "nested": ["https://cdn/z?token=abc"]}
+    out = pd.scrub_signed_urls(rec)
+    assert out["activiable"]["main_url"] == "https://cdn/photos/files/p1/main/p1.jpg"  # signed stripped
+    assert "Signature" not in str(out) and "token=" not in str(out)
+    assert out["plain"] == "https://cdn/x/y.jpg"                                       # unsigned untouched
+    # the local-file lookup still works after scrubbing (id_from_url ignores query)
+    assert pd.id_from_url(out["activiable"]["main_url"]) == "p1"
+
+
+def test_lightbox_and_summary():
+    out = tempfile.mkdtemp(prefix="sb_lb_")
+    recs = [photo_activity("k1", "2025-06-01", "p1"), photo_activity("k1", "2025-06-02", "p2"),
+            {"activity_type": "note_activity", "id": "n1", "activity_date": "2025-06-01",
+             "activity_time": "2025-06-01T09:00:00-04:00", "kid_ids": ["k1"], "data": {"desc": "hi"}}]
+    for r in recs:
+        if r["activity_type"] == "photo_activity":
+            plant(sb.media_root(out), r)
+    sb.build_scrapbook([{"name": "Maya", "class_name": "Room", "folder": "", "records": recs}], out)
+    land = open(os.path.join(out, "Open Scrapbook.html"), encoding="utf-8").read()
+    assert 'class="stats"' in land and "2</b> photos" in land       # summary present
+    assert 'id="lightbox"' in land                                  # lightbox on landing too
+    mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
+    month = open(os.path.join(out, "Scrapbook", mp), encoding="utf-8").read()
+    assert "lightbox" in month and "classList.contains('media')" in month
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

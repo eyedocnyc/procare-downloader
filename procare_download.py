@@ -236,12 +236,19 @@ def ext_from_url(url, default):
 # --------------------------------------------------------------------------- #
 # Download + timestamp
 # --------------------------------------------------------------------------- #
-def fetch_json(session, url, params, label=""):
+def fetch_json(session, url, params, label="", reauth=None):
+    reauthed = False
     for attempt in range(RETRIES):
         try:
             resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
                 return resp.json()
+            # Token expired mid-run: log in again once and retry immediately.
+            if resp.status_code in (401, 403) and reauth and not reauthed:
+                reauthed = True
+                print("  (session expired — signing in again...)")
+                reauth()
+                continue
             if resp.status_code in (429, 500, 502, 503, 504):
                 time.sleep(2 ** attempt)
                 continue
@@ -636,7 +643,7 @@ def collect_media_entries(it):
 
 
 def fetch_all_records(session, base, kids, start_date, end_date,
-                      debug=False, out_dir=None):
+                      debug=False, out_dir=None, reauth=None):
     """Walk the daily-activities feed (JSON only, no downloads) and return the
     list of activity records, deduped by id. Walks month-by-month because the
     feed caps how much it returns per query."""
@@ -653,7 +660,7 @@ def fetch_all_records(session, base, kids, start_date, end_date,
                     "filters[daily_activity][date_to]": win_to,
                     "page": page,
                 }
-                payload = fetch_json(session, url, params, ACTIVITIES_PATH)
+                payload = fetch_json(session, url, params, ACTIVITIES_PATH, reauth=reauth)
                 if payload is None:
                     break
                 items = payload.get("daily_activities") if isinstance(payload, dict) else None
@@ -688,6 +695,27 @@ def fetch_all_records(session, base, kids, start_date, end_date,
         except Exception as e:
             print(f"  [debug] could not write dump: {e}")
     return records
+
+
+# Markers that identify a signed/expiring CDN URL query we should not archive.
+_SIGNING_MARKERS = ("Signature=", "Expires=", "X-Amz-", "Key-Pair-Id=", "token=")
+
+
+def scrub_signed_urls(obj):
+    """Recursively drop signed query strings from URLs (deep-copies the data).
+
+    feed.json embeds full-resolution media URLs with time-limited signatures; we
+    strip those so a shared archive can't hand out working links to the media.
+    The local path is preserved, which is all the scrapbook rebuild needs."""
+    if isinstance(obj, dict):
+        return {k: scrub_signed_urls(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [scrub_signed_urls(v) for v in obj]
+    if isinstance(obj, str) and obj.startswith("http") and "?" in obj:
+        base, query = obj.split("?", 1)
+        if any(m in query for m in _SIGNING_MARKERS):
+            return base
+    return obj
 
 
 def in_range(dt, since_dt, until_dt):
@@ -938,6 +966,10 @@ def run(args):
     print(f"Authenticated. Saving to: {out_dir}\n")
     school = args.school  # shown only if explicitly provided; not auto-detected
 
+    def reauth():
+        """Re-login if the session token expires during a long run."""
+        authenticate(session, email, password)
+
     kids_meta = get_kids_meta(session, base)
     kids = [k["id"] for k in kids_meta]
     print(f"Found {len(kids)} child profile(s) on the account.\n")
@@ -971,7 +1003,7 @@ def run(args):
     print("Reading the activity feed — this can take a minute or two for a full year,")
     print("please wait (it isn't frozen)...")
     all_records = fetch_all_records(session, base, kids, walk_start, walk_end,
-                                    debug=args.debug, out_dir=out_dir)
+                                    debug=args.debug, out_dir=out_dir, reauth=reauth)
 
     import scrapbook
 
@@ -1026,12 +1058,12 @@ def run(args):
 
     if want_scrapbook:
         os.makedirs(os.path.dirname(feed_path), exist_ok=True)
+        feed_data = {"generated_at": datetime.now().isoformat(), "school": school,
+                     "sections": [{"name": s["name"], "class_name": s["class_name"],
+                                   "folder": s["folder"], "records": s["records"]}
+                                  for s in sections]}
         with open(feed_path, "w", encoding="utf-8") as fh:
-            json.dump({"generated_at": datetime.now().isoformat(), "school": school,
-                       "sections": [{"name": s["name"], "class_name": s["class_name"],
-                                     "folder": s["folder"], "records": s["records"]}
-                                    for s in sections]},
-                      fh, indent=2, default=str)
+            json.dump(scrub_signed_urls(feed_data), fh, indent=2, default=str)
         pages = scrapbook.build_scrapbook(
             [{"name": s["name"], "class_name": s["class_name"],
               "folder": s["folder"], "records": s["records"]} for s in sections],

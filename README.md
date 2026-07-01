@@ -34,6 +34,9 @@ Most people should just grab the prebuilt app:
   `ProcareDownloader`. First launch is blocked by Gatekeeper → **right-click → Open → Open**
   (one time only). *(Older Intel Macs aren't supported by the prebuilt app — run from source instead.)*
 
+Each release also includes a `.sha256` checksum file if you'd like to verify your download
+(`sha256sum ProcareDownloader-Windows.zip` on Windows/Linux, `shasum -a 256 …` on Mac).
+
 Then just follow the prompts:
 
 1. Choose **option 1** (download everything + build the scrapbook).
@@ -53,7 +56,8 @@ browse it.
 - **A scrapbook** — one HTML page per month plus a front page — showing each day's teacher notes
   and learning activities with the photos and videos embedded inline. Routine logs (meals, naps,
   sign in/out, bathroom) are condensed into a compact "daily log" line per day. The scrapbook is
-  titled with your child and class (e.g. *"Maya's Year in Emerald Lilies"*).
+  titled with your child and class (e.g. *"Maya's Year in Emerald Lilies"*). Click any photo to view
+  it full-screen, and the front page shows a summary (photos, videos, notes, date range, busiest month).
 
 ```
 procare_media/
