@@ -137,6 +137,41 @@ def test_choose_scope_prompts_even_single_class():
     assert s == datetime(2025, 10, 1) and u == datetime(2025, 12, 31, 23, 59, 59) and name is None
 
 
+def test_gallery_only_becomes_record():
+    entries = [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
+    sel = pd.merge_gallery_media([], entries, None, None, "k1", set())
+    assert len(sel) == 1
+    rec = sel[0]
+    assert rec["activity_type"] == "photo_activity" and rec["kid_ids"] == ["k1"]
+    got = pd.collect_media_entries(rec)
+    assert got == [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
+
+
+def test_gallery_dedups_against_activity_feed():
+    # Same photo already present via the activity feed -> gallery copy is dropped.
+    rec = photo_activity("k1", "2025-06-01", "p1")
+    entries = [("https://cdn/photos/files/p1/main/p1.jpg", datetime(2025, 6, 1, 10), "p1", "photo"),
+               ("https://cdn/photos/files/p2/main/p2.jpg", datetime(2025, 6, 2, 10), "p2", "photo")]
+    sel = pd.merge_gallery_media([rec], entries, None, None, "k1", set())
+    assert len(sel) == 2                                   # p1 stays deduped, p2 is new
+    assert sum(1 for r in sel if r.get("id") == "gallery-photo-p2") == 1
+    assert not any(r.get("id") == "gallery-photo-p1" for r in sel)
+
+
+def test_gallery_dedups_across_kids_when_unscoped():
+    entries = [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
+    shared_seen = set()
+    sel1 = pd.merge_gallery_media([], entries, None, None, "k1", shared_seen)
+    sel2 = pd.merge_gallery_media([], entries, None, None, "k2", shared_seen)
+    assert len(sel1) == 1 and len(sel2) == 0                # k2 doesn't get k1's item twice
+
+
+def test_gallery_respects_date_range():
+    entries = [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 1, 1, 10), "g1", "photo")]
+    sel = pd.merge_gallery_media([], entries, datetime(2025, 6, 1), None, "k1", set())
+    assert sel == []
+
+
 def test_first_name():
     assert sb.first_name({"name": "Patel, Maya"}) == "Maya"
     assert sb.first_name({"name": "Maya Patel"}) == "Maya"

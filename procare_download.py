@@ -53,9 +53,15 @@ BASE_URLS = [
 
 # Videos come from their own simple paginated endpoint.
 VIDEO_PATH = "parent/videos/"
-# Photos must be pulled from the daily-activities feed (the bare parent/photos/
-# endpoint now returns HTTP 400). Each activity item carries an activity_type and
-# the real media object under the (Procare-misspelled) "activiable" key.
+# Some daycares post everything through the daily-activities feed; others (or
+# some rooms within the same school) upload straight into the gallery and never
+# create an activity record at all. So we always query BOTH: the feed (each
+# activity item carries an activity_type and the real media object under the
+# (Procare-misspelled) "activiable" key) and the bare gallery endpoints below,
+# then merge + dedup (see fetch_gallery_media / merge_gallery_media). Some
+# accounts 400 on the bare gallery endpoints (older backends) - that's treated
+# as "nothing here", not an error.
+GALLERY_PHOTO_PATH = "parent/photos/"
 ACTIVITIES_PATH = "parent/daily_activities/"
 KIDS_PATH = "parent/kids/"
 # We don't filter the activity feed by type: photos can be attached to many
@@ -236,7 +242,11 @@ def ext_from_url(url, default):
 # --------------------------------------------------------------------------- #
 # Download + timestamp
 # --------------------------------------------------------------------------- #
-def fetch_json(session, url, params, label="", reauth=None):
+def fetch_json(session, url, params, label="", reauth=None, quiet=False):
+    """`quiet` suppresses the HTTP-error print — use it for endpoints that are
+    expected to 400/404 on some accounts (e.g. the bare gallery endpoints on
+    backends that don't support them) so a normal run doesn't look like it hit
+    an error when there's simply nothing there."""
     reauthed = False
     for attempt in range(RETRIES):
         try:
@@ -252,12 +262,14 @@ def fetch_json(session, url, params, label="", reauth=None):
             if resp.status_code in (429, 500, 502, 503, 504):
                 time.sleep(2 ** attempt)
                 continue
-            print(f"  ! HTTP {resp.status_code} on {label or url} "
-                  f"(params={params}); stopping this feed.")
+            if not quiet:
+                print(f"  ! HTTP {resp.status_code} on {label or url} "
+                      f"(params={params}); stopping this feed.")
             return None
         except requests.RequestException as e:
             if attempt == RETRIES - 1:
-                print(f"  ! Network error on {label or url}: {e}")
+                if not quiet:
+                    print(f"  ! Network error on {label or url}: {e}")
                 return None
             time.sleep(2 ** attempt)
     return None
@@ -490,35 +502,84 @@ def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
     time.sleep(POLITE_DELAY)
 
 
-def process_simple_feed(session, base, label, path, out_dir, since_dt, stats,
-                        seen=None, overwrite=False, until_dt=None):
-    """Paginated feed where each item is itself the media (e.g. parent/videos/)."""
-    default_ext = ".jpg" if label == "photo" else ".mp4"
-    page = 1
-    while True:
-        payload = fetch_json(session, base + path, {"page": page}, path)
-        if payload is None:
-            break
-        items = extract_items(payload)
-        if not items:
-            break
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            # For videos, grab the real video URL (not the poster image).
-            url = find_video_url(item) if label == "video" else None
-            if not url:
-                url = find_media_url(item)
-            # Identify by URL filename so the same file dedups against the
-            # activity feed (which only ever sees the URL).
-            save_media(session, url, find_capture_dt(item), label,
-                       id_from_url(url) if url else None,
-                       out_dir, since_dt, stats, default_ext, seen=seen,
-                       overwrite=overwrite, until_dt=until_dt)
-        print(f"  ...{label}s page {page} done "
-              f"(downloaded {stats['downloaded']}, skipped {stats['skipped_exist']})")
-        page += 1
-        time.sleep(POLITE_DELAY)
+def fetch_gallery_media(session, base, kid_id, reauth=None):
+    """Fetch photos & videos posted straight into the gallery, bypassing the
+    daily-activities feed entirely. Some daycares (or some rooms) only use the
+    gallery and never create an activity record, so this is queried
+    unconditionally alongside the feed - not just as a fallback - and the
+    caller merges + dedups the two (see merge_gallery_media).
+
+    Returns [(url, dt, ident, kind), ...], the same shape as
+    collect_media_entries. An account whose backend doesn't support one of
+    these endpoints (some 400) just yields nothing for it.
+    """
+    entries = []
+    for kind, path in (("video", VIDEO_PATH), ("photo", GALLERY_PHOTO_PATH)):
+        page = 1
+        while True:
+            params = {"page": page}
+            if kid_id:
+                params["kid_id"] = kid_id
+            payload = fetch_json(session, base + path, params, path, reauth=reauth, quiet=True)
+            if payload is None:
+                break
+            items = extract_items(payload)
+            if not items:
+                break
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                # For videos, grab the real video URL (not the poster image).
+                url = find_video_url(item) if kind == "video" else find_media_url(item)
+                if not url:
+                    continue
+                # Video URLs are randomized 'open-uri' names that change on every
+                # request (see collect_media_entries) - identify by the item's own
+                # resource id instead, so it dedups correctly against the same
+                # video seen via the activity feed.
+                ident = item.get("id") if kind == "video" and item.get("id") is not None \
+                    else id_from_url(url)
+                entries.append((url, find_capture_dt(item), str(ident), kind))
+            page += 1
+            time.sleep(POLITE_DELAY)
+    return entries
+
+
+def gallery_entry_to_record(url, dt, ident, kind, kid_id=None):
+    """Wrap a bare gallery photo/video into an activity-shaped dict so it flows
+    through the same download/scrapbook code path as feed-sourced media."""
+    return {
+        "id": f"gallery-{kind}-{ident}",
+        "activity_type": "photo_activity" if kind == "photo" else "video_activity",
+        "activity_date": dt.strftime("%Y-%m-%d") if dt else None,
+        "activity_time": dt.isoformat() if dt else None,
+        "kid_ids": [kid_id] if kid_id else [],
+        "comment": None,
+        "activiable": {"id": ident, "main_url": url},
+    }
+
+
+def existing_media_idents(records):
+    """(kind, ident) pairs for every media item already present in `records`."""
+    return {(kind, ident) for r in records for _, _, ident, kind in collect_media_entries(r)}
+
+
+def merge_gallery_media(sel, gallery_entries, since_dt, until_dt, kid_id, dedup_idents):
+    """Append gallery-only media (not already covered by an activity record) to
+    `sel` as synthetic records, so a photo/video that exists in BOTH the
+    activity feed and the gallery is only kept once. `dedup_idents` is mutated
+    in place and should be shared across kids so the same gallery item (on
+    accounts where the gallery isn't actually kid-scoped) isn't attached to
+    more than one child's folder. Returns `sel`."""
+    idents = existing_media_idents(sel) | dedup_idents
+    for url, dt, ident, kind in gallery_entries:
+        key = (kind, ident)
+        if key in idents or not in_range(dt, since_dt, until_dt):
+            continue
+        idents.add(key)
+        dedup_idents.add(key)
+        sel.append(gallery_entry_to_record(url, dt, ident, kind, kid_id))
+    return sel
 
 
 def month_windows(start_date, end_date):
@@ -973,24 +1034,16 @@ def run(args):
     kids_meta = get_kids_meta(session, base)
     kids = [k["id"] for k in kids_meta]
     print(f"Found {len(kids)} child profile(s) on the account.\n")
+    if not kids_meta:
+        # No child profiles at all: still run the normal single-section pipeline
+        # below (activity feed walk finds nothing, since kids=[]) so the
+        # account-wide gallery - fetched unconditionally per section - is what
+        # actually supplies the media.
+        print("  No child profiles found; using the account-wide gallery.\n")
+        kids_meta = [{"id": None, "name": "", "first_name": ""}]
 
     stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
-    seen = set()              # dedups within this run
     download = not args.scrapbook_only  # scrapbook-only doesn't re-download media
-
-    # No child profiles: fall back to the simple gallery endpoints and stop.
-    if not kids:
-        if download:
-            print("  No child profiles found; falling back to the gallery endpoints.")
-            process_simple_feed(session, base, "video", VIDEO_PATH, out_dir, since_dt,
-                                stats, seen=seen, overwrite=args.overwrite, until_dt=until_dt)
-            process_simple_feed(session, base, "photo", "parent/photos/", out_dir,
-                                since_dt, stats, seen=seen, overwrite=args.overwrite,
-                                until_dt=until_dt)
-            _print_download_summary(stats, out_dir, since_dt or until_dt)
-        if args.zip:
-            make_zip(out_dir)
-        return
 
     # Decide how much of the feed to walk. For the interactive class picker we
     # need the full history (to list every class); otherwise just the range.
@@ -1011,6 +1064,7 @@ def run(args):
     # its own class name, and (when there are siblings) its own media subfolder.
     multi = len(kids_meta) > 1
     sections, used_folders = [], set()
+    gallery_seen = set()  # shared across kids so an unscoped gallery isn't duplicated per child
     for kid in kids_meta:
         kid_id = kid.get("id")
         who = scrapbook.first_name(kid) or "My Child"
@@ -1029,6 +1083,14 @@ def run(args):
                 print(f"{who}: {lo} to {hi}\n")
 
         sel = [r for r in kid_records if in_range(find_capture_dt(r), c_since, c_until)]
+
+        # Some daycares upload straight into the gallery and never create an
+        # activity record at all (or do both, inconsistently). Always check the
+        # gallery too, and merge in only what the activity feed didn't already
+        # find, so a photo posted both ways doesn't get counted/downloaded twice.
+        gallery_entries = fetch_gallery_media(session, base, kid_id, reauth=reauth)
+        sel = merge_gallery_media(sel, gallery_entries, c_since, c_until, kid_id, gallery_seen)
+
         cls = args.class_name or picked or scrapbook.detect_class_name(sel)
 
         folder = ""

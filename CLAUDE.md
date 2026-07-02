@@ -32,7 +32,10 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 - Kids: `GET parent/kids/` → each has `id` (UUID), `name` (usually "Lastname, Firstname"), sometimes `first_name`.
 - Feed: `GET parent/daily_activities/?kid_id=<id>&filters[daily_activity][date_from]=YYYY-MM-DD&filters[daily_activity][date_to]=...&page=N`.
   The feed **caps the window per query**, so we walk **month-by-month** (`month_windows`).
-- The bare `parent/photos/` endpoint returns HTTP 400 now — photos come from the activity feed.
+- The bare `parent/photos/` endpoint returns HTTP 400 on *some* accounts — where it works, it (and
+  `parent/videos/`) is how "gallery-only" daycares expose media that never went through an activity.
+  We query both endpoints unconditionally per child (`fetch_gallery_media`); a 400 there is treated as
+  "nothing here", not an error (`fetch_json(..., quiet=True)`).
 - Each activity: `activity_type`, `activity_time`/`activity_date`, `comment`, `data` (type-specific),
   `kid_ids` (which children it belongs to), `staff_present_name`, and `activiable` (the media/detail object).
 
@@ -57,6 +60,15 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 - **No browser/hosted version is feasible.** A hosted web app can't call Procare's API (CORS: the API only
   allows Procare's own origin). Only in-page code (extension/userscript/bookmarklet reusing the logged-in
   session) could work. The desktop app is the supported path.
+- **Activities and gallery are two independent, overlapping sources.** Some daycares post everything as
+  activities, some skip activities and upload straight to the gallery, and some do both for the same
+  photo/video. We always fetch both (`fetch_all_records` + `fetch_gallery_media` per child) and merge
+  with `merge_gallery_media`, which wraps gallery-only items into activity-shaped records
+  (`gallery_entry_to_record`, `activity_type` `photo_activity`/`video_activity`) so they flow through the
+  normal download/scrapbook path. Dedup key is the same `(kind, ident)` used everywhere else — a video's
+  `ident` is its resource id (not the unstable URL), a photo's is `id_from_url` — so an item posted both
+  ways is kept once. `gallery_seen` is shared across all of a run's children in case an account's gallery
+  endpoints ignore `kid_id` and return the same items for every child.
 
 ## Output layout
 
