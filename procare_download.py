@@ -25,6 +25,7 @@ official/public API and may break if Procare changes their backend.
 import argparse
 import getpass
 import glob
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,7 @@ import shutil
 import sys
 import time
 from datetime import date, datetime, timedelta
+from urllib.parse import urlsplit
 
 try:
     import requests
@@ -51,6 +53,31 @@ BASE_URLS = [
     "https://api-school.kinderlime.com/api/web/",
 ]
 
+# Only these hosts ever receive the account's bearer token. Media downloads go to
+# CDN/S3 hosts on signed URLs that authorize themselves, so they must NOT carry the
+# Authorization header (that would leak the token to CloudFront/S3). We authenticate
+# only when the destination host is exactly one of these; everything else (media) is
+# fetched with a separate, unauthenticated session. This is belt-and-suspenders with
+# requests' own behavior of dropping auth on cross-host redirects.
+PROCARE_AUTH_HOSTS = {
+    "api-school.procareconnect.com",
+    "api-school.kinderlime.com",
+}
+
+
+def is_procare_host(url):
+    """True iff `url` is https and its host is EXACTLY an allowlisted Procare API
+    host. Exact hostname match (not suffix) so a look-alike like
+    `api-school.procareconnect.com.attacker.test` is rejected; the query string
+    can't affect the decision because urlsplit parses the host separately."""
+    if not isinstance(url, str):
+        return False
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        return False
+    host = (parts.hostname or "").lower()
+    return host in PROCARE_AUTH_HOSTS
+
 # Videos come from their own simple paginated endpoint.
 VIDEO_PATH = "parent/videos/"
 # Some daycares post everything through the daily-activities feed; others (or
@@ -58,9 +85,9 @@ VIDEO_PATH = "parent/videos/"
 # create an activity record at all. So we always query BOTH: the feed (each
 # activity item carries an activity_type and the real media object under the
 # (Procare-misspelled) "activiable" key) and the bare gallery endpoints below,
-# then merge + dedup (see fetch_gallery_media / merge_gallery_media). Some
-# accounts 400 on the bare gallery endpoints (older backends) - that's treated
-# as "nothing here", not an error.
+# then merge + dedup (see collect_gallery / distribute_gallery). Some accounts
+# 400 on the bare gallery endpoints (older backends) - that's treated as
+# "nothing here", not an error.
 GALLERY_PHOTO_PATH = "parent/photos/"
 ACTIVITIES_PATH = "parent/daily_activities/"
 KIDS_PATH = "parent/kids/"
@@ -341,18 +368,51 @@ def sniff_ext(head):
     return None
 
 
-def download_file(session, url, dest):
+# Head-byte signatures of the error pages a CDN sometimes serves with HTTP 200
+# instead of a real error status (an HTML "access denied"/"expired" page, or a
+# JSON error body). These are never valid photo/video content, so we reject them.
+_ERROR_PAGE_PREFIXES = (b"<!doctype", b"<!DOCTYPE", b"<html", b"<HTML", b"<?xml", b"{")
+
+
+def _remove_quiet(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _looks_like_error_page(content_type, head):
+    """True if a 200 response is really an HTML/JSON/text error page, not media.
+    We reject only clearly-bad content types / signatures; anything else is
+    accepted (so video formats sniff_ext doesn't recognize still download)."""
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct.startswith("text/") or ct in ("application/json", "application/xml"):
+        return True
+    stripped = head.lstrip()[:16]
+    return any(stripped.startswith(p) for p in _ERROR_PAGE_PREFIXES)
+
+
+def download_file(session, media_session, url, dest):
     """Download `url` to `dest`. Returns (ok, head_bytes).
 
-    head_bytes are the first bytes of the file so the caller can verify the
-    real type. We keep the session's auth header: Procare-proxied media URLs
-    need it, and `requests` automatically drops it on cross-host redirects
-    (e.g. to S3), so signed CDN links still work.
+    `session` is the authenticated Procare session; `media_session` is a separate
+    UNauthenticated session. We send the bearer token ONLY to allowlisted Procare
+    hosts (`is_procare_host`) — Procare-proxied media needs it — and fetch signed
+    CDN/S3 URLs with the unauthenticated session so the token never leaks off-domain.
+    `requests` also drops auth on cross-host redirects, so this stays correct when a
+    Procare URL redirects to S3. Non-https media URLs are refused outright.
+
+    head_bytes are the first bytes of the file so the caller can verify the real type.
     """
+    if not (isinstance(url, str) and url.lower().startswith("https://")):
+        # Refuse plaintext http:// (and anything non-URL): no media should be
+        # fetched over a channel that could expose a signed link or be tampered.
+        return False, b""
+    use_session = session if is_procare_host(url) else media_session
     for attempt in range(RETRIES):
         try:
-            with session.get(url, stream=True, timeout=REQUEST_TIMEOUT,
-                             allow_redirects=True) as resp:
+            with use_session.get(url, stream=True, timeout=REQUEST_TIMEOUT,
+                                 allow_redirects=True) as resp:
                 if resp.status_code != 200:
                     if resp.status_code in (429, 500, 502, 503, 504) and attempt < RETRIES - 1:
                         time.sleep(2 ** attempt)
@@ -361,6 +421,7 @@ def download_file(session, url, dest):
 
                 expected = resp.headers.get("Content-Length")
                 expected = int(expected) if expected and expected.isdigit() else None
+                content_type = resp.headers.get("Content-Type")
 
                 tmp = dest + ".part"
                 written = 0
@@ -373,14 +434,17 @@ def download_file(session, url, dest):
                             fh.write(chunk)
                             written += len(chunk)
 
-                # Reject truncated downloads and obviously-too-small error bodies.
-                bad = (written == 0
-                       or (expected is not None and written != expected))
-                if bad:
-                    try:
-                        os.remove(tmp)
-                    except OSError:
-                        pass
+                # An HTML/JSON error page served with a 200 is a complete, wrong
+                # response — retrying the same (e.g. expired-signature) URL just
+                # returns it again, so fail fast without burning the backoff.
+                if _looks_like_error_page(content_type, head):
+                    _remove_quiet(tmp)
+                    return False, b""
+
+                # A truncated/empty body, by contrast, is often a transient hiccup
+                # worth retrying.
+                if written == 0 or (expected is not None and written != expected):
+                    _remove_quiet(tmp)
                     if attempt < RETRIES - 1:
                         time.sleep(2 ** attempt)
                         continue
@@ -445,13 +509,15 @@ def find_local_media(out_dir, dt, label, ident):
     return matches[0] if matches else None
 
 
-def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
-               default_ext, seen=None, overwrite=False, until_dt=None):
+def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
+               stats, default_ext, seen=None, overwrite=False, until_dt=None):
     """Download one media item into its monthly folder and timestamp it.
 
-    `seen` is a set used to dedup the same file across feeds within one run
-    (e.g. a video that appears in both the gallery and the activity feed).
-    `since_dt`/`until_dt` bound which capture dates are kept.
+    `session` is the authenticated Procare session; `media_session` is the
+    separate unauthenticated one used for off-domain (CDN) media — see
+    `download_file`. `seen` is a set used to dedup the same file across feeds
+    within one run (e.g. a video that appears in both the gallery and the
+    activity feed). `since_dt`/`until_dt` bound which capture dates are kept.
     """
     if not url:
         stats["failed"] += 1
@@ -462,7 +528,10 @@ def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
         stats["skipped_old"] += 1
         return
 
-    ident = str(ident or id_from_url(url) or abs(hash(url)) % 10**8)
+    # Fallback identity chain: given ident -> URL filename -> deterministic
+    # SHA of the URL. Never the randomized hash() (broke re-run idempotency)
+    # and never the literal "None" (distinct id-less items would collide).
+    ident = str(ident or id_from_url(url) or stable_media_ident(url))
     key = f"{label}:{ident}"
     if seen is not None and key in seen:
         stats["skipped_exist"] += 1
@@ -481,7 +550,7 @@ def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
             return
 
     tmp = os.path.join(month_dir, stem + ".part")
-    ok, head = download_file(session, url, tmp)
+    ok, head = download_file(session, media_session, url, tmp)
     if not ok:
         stats["failed"] += 1
         print(f"  ! failed: {url[:80]}")
@@ -502,16 +571,46 @@ def save_media(session, url, dt, label, ident, out_dir, since_dt, stats,
     time.sleep(POLITE_DELAY)
 
 
+# Keys a gallery item MIGHT use to name the child(ren) it belongs to. Observed on
+# real accounts: the gallery returns NONE of these (items are account-wide and
+# child-agnostic), but we read them if present so the code stays correct if Procare
+# ever starts tagging gallery media per child.
+GALLERY_KID_LIST_KEYS = ("kid_ids", "student_ids", "child_ids")
+GALLERY_KID_SINGLE_KEYS = ("kid_id", "student_id", "child_id")
+GALLERY_KID_OBJ_KEYS = ("kids", "students", "participants")
+
+
+def gallery_item_kids(item):
+    """Explicit child association on a gallery item, as a list of id strings, or []
+    if the item names no child (the common case — gallery media is account-wide)."""
+    for k in GALLERY_KID_LIST_KEYS:
+        v = item.get(k)
+        if isinstance(v, list) and v:
+            return [str(x) for x in v if x is not None]
+    for k in GALLERY_KID_SINGLE_KEYS:
+        v = item.get(k)
+        if v is not None:
+            return [str(v)]
+    for k in GALLERY_KID_OBJ_KEYS:
+        v = item.get(k)
+        if isinstance(v, list):
+            ids = [str(x.get("id")) for x in v if isinstance(x, dict) and x.get("id") is not None]
+            if ids:
+                return ids
+    return []
+
+
 def fetch_gallery_media(session, base, kid_id, reauth=None):
     """Fetch photos & videos posted straight into the gallery, bypassing the
     daily-activities feed entirely. Some daycares (or some rooms) only use the
     gallery and never create an activity record, so this is queried
-    unconditionally alongside the feed - not just as a fallback - and the
-    caller merges + dedups the two (see merge_gallery_media).
+    unconditionally alongside the feed - not just as a fallback.
 
-    Returns [(url, dt, ident, kind), ...], the same shape as
-    collect_media_entries. An account whose backend doesn't support one of
-    these endpoints (some 400) just yields nothing for it.
+    Returns [(url, dt, ident, kind, assoc_kids), ...] where `assoc_kids` is the
+    list of child ids the item explicitly names (usually empty — the gallery is
+    account-wide and child-agnostic). The caller decides attribution and dedup
+    (see collect_gallery / distribute_gallery). An account whose backend doesn't
+    support one of these endpoints (some 400) just yields nothing for it.
     """
     entries = []
     for kind, path in (("video", VIDEO_PATH), ("photo", GALLERY_PHOTO_PATH)):
@@ -538,16 +637,114 @@ def fetch_gallery_media(session, base, kid_id, reauth=None):
                 # resource id instead, so it dedups correctly against the same
                 # video seen via the activity feed.
                 ident = item.get("id") if kind == "video" and item.get("id") is not None \
-                    else id_from_url(url)
-                entries.append((url, find_capture_dt(item), str(ident), kind))
+                    else (id_from_url(url) or stable_media_ident(url))
+                entries.append((url, find_capture_dt(item), str(ident), kind,
+                                gallery_item_kids(item)))
             page += 1
             time.sleep(POLITE_DELAY)
     return entries
 
 
+def collect_gallery(session, base, kid_ids, reauth=None):
+    """Query the gallery once per child id and collapse the results per media item.
+
+    Returns {(kind, ident): {"url", "dt", "assoc": set(explicit kid ids),
+    "returned_for": set(kid ids whose query returned this item)}}. `returned_for`
+    is the signal that lets us tell a genuinely per-child gallery (item comes back
+    for only one kid) from an account-wide one (same item for every kid)."""
+    meta = {}
+    for kid_id in kid_ids:
+        for url, dt, ident, kind, assoc in fetch_gallery_media(session, base, kid_id, reauth=reauth):
+            m = meta.setdefault((kind, ident),
+                                {"url": url, "dt": dt, "assoc": set(), "returned_for": set()})
+            m["assoc"].update(assoc)
+            if kid_id is not None:
+                m["returned_for"].add(kid_id)
+    return meta
+
+
+def distribute_gallery(meta, sections, since_dt, until_dt):
+    """Attach gallery media to the right child section(s), returning any
+    child-agnostic gallery-only records for a shared bucket.
+
+    Rules (see plan #2): skip items already present via an activity record (they're
+    correctly attributed there); attribute an item to the child(ren) it explicitly
+    names, else to the single child whose query returned it (a per-child gallery),
+    else treat it as account-wide. Account-wide items go to the sole child when
+    there's only one, otherwise to the returned "Shared Gallery" list. Never
+    duplicated within a section, never dumped on an arbitrary child."""
+    if not sections:
+        return []
+    by_kid = {s.get("kid_id"): s for s in sections}
+    real_kids = [k for k in by_kid if k is not None]
+    n_kids = len(real_kids)
+    # (kind, ident) already downloaded/shown via activities, across ALL children.
+    known = set()
+    section_idents = {}
+    for s in sections:
+        ids = existing_media_idents(s["records"])
+        section_idents[id(s)] = set(ids)
+        known |= ids
+
+    def _range_for(section):
+        return section.get("since", since_dt), section.get("until", until_dt)
+
+    shared = []
+    shared_seen = set()
+    for (kind, ident), m in meta.items():
+        if (kind, ident) in known:
+            continue
+        assoc = [k for k in m["assoc"] if k in by_kid]
+        if assoc:
+            targets = assoc
+        elif m["returned_for"] and len(m["returned_for"]) < max(n_kids, 1):
+            # Returned for a strict subset of kids -> the endpoint discriminates,
+            # so attribute to exactly those kids.
+            targets = list(m["returned_for"])
+        else:
+            targets = []  # account-wide / child-agnostic
+
+        if targets:
+            for k in targets:
+                s = by_kid[k]
+                if (kind, ident) in section_idents[id(s)]:
+                    continue
+                lo, hi = _range_for(s)
+                if not in_range(m["dt"], lo, hi):
+                    continue
+                section_idents[id(s)].add((kind, ident))
+                s["records"].append(gallery_entry_to_record(m["url"], m["dt"], ident, kind, k))
+        elif n_kids <= 1:
+            # Single child (or no child profiles): no ambiguity — it's theirs.
+            s = sections[0]
+            if (kind, ident) in section_idents[id(s)]:
+                continue
+            lo, hi = _range_for(s)
+            if not in_range(m["dt"], lo, hi):
+                continue
+            section_idents[id(s)].add((kind, ident))
+            s["records"].append(gallery_entry_to_record(m["url"], m["dt"], ident, kind,
+                                                         s.get("kid_id")))
+        else:
+            # Multiple children, no way to attribute -> shared bucket. Keep if it
+            # falls in ANY child's selected date window.
+            if (kind, ident) in shared_seen:
+                continue
+            if not any(in_range(m["dt"], *_range_for(s)) for s in sections):
+                continue
+            shared_seen.add((kind, ident))
+            shared.append(gallery_entry_to_record(m["url"], m["dt"], ident, kind, None))
+    return shared
+
+
 def gallery_entry_to_record(url, dt, ident, kind, kid_id=None):
     """Wrap a bare gallery photo/video into an activity-shaped dict so it flows
-    through the same download/scrapbook code path as feed-sourced media."""
+    through the same download/scrapbook code path as feed-sourced media.
+
+    The media URL is placed under a key `collect_media_urls` will recognize for
+    this kind: videos under `video_file_url` (their open-uri URLs have no file
+    extension, so they're only detectable by key name), photos under `main_url`."""
+    url_key = "video_file_url" if kind == "video" else "main_url"
     return {
         "id": f"gallery-{kind}-{ident}",
         "activity_type": "photo_activity" if kind == "photo" else "video_activity",
@@ -555,31 +752,13 @@ def gallery_entry_to_record(url, dt, ident, kind, kid_id=None):
         "activity_time": dt.isoformat() if dt else None,
         "kid_ids": [kid_id] if kid_id else [],
         "comment": None,
-        "activiable": {"id": ident, "main_url": url},
+        "activiable": {"id": ident, url_key: url},
     }
 
 
 def existing_media_idents(records):
     """(kind, ident) pairs for every media item already present in `records`."""
     return {(kind, ident) for r in records for _, _, ident, kind in collect_media_entries(r)}
-
-
-def merge_gallery_media(sel, gallery_entries, since_dt, until_dt, kid_id, dedup_idents):
-    """Append gallery-only media (not already covered by an activity record) to
-    `sel` as synthetic records, so a photo/video that exists in BOTH the
-    activity feed and the gallery is only kept once. `dedup_idents` is mutated
-    in place and should be shared across kids so the same gallery item (on
-    accounts where the gallery isn't actually kid-scoped) isn't attached to
-    more than one child's folder. Returns `sel`."""
-    idents = existing_media_idents(sel) | dedup_idents
-    for url, dt, ident, kind in gallery_entries:
-        key = (kind, ident)
-        if key in idents or not in_range(dt, since_dt, until_dt):
-            continue
-        idents.add(key)
-        dedup_idents.add(key)
-        sel.append(gallery_entry_to_record(url, dt, ident, kind, kid_id))
-    return sel
 
 
 def month_windows(start_date, end_date):
@@ -611,6 +790,15 @@ def id_from_url(url):
     base = path.rsplit("/", 1)[-1]
     stem = base.rsplit(".", 1)[0]
     return stem or None
+
+
+def stable_media_ident(url):
+    """Deterministic identity for a media item that has no usable id and whose
+    URL filename yields nothing (e.g. an odd proxy URL). A SHA-256 of the URL
+    with its signed/expiring query stripped, so it's stable across runs — never
+    Python's per-process-randomized hash() and never the literal string "None"."""
+    normalized = (url or "").split("?")[0]
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
 
 
 def collect_media_urls(obj, _depth=0, _seen=None):
@@ -695,12 +883,31 @@ def collect_media_entries(it):
             # request, so they are NOT a stable identity. Use the activity's
             # resource id (a UUID) instead, so the same video always maps to the
             # same filename across feeds and re-runs.
-            ident = resource_id or id_from_url(url)
+            ident = resource_id or id_from_url(url) or stable_media_ident(url)
         else:
             # Photo URLs carry a stable file UUID in the path.
-            ident = id_from_url(url)
+            ident = id_from_url(url) or stable_media_ident(url)
         entries.append((url, outer_dt, str(ident), kind))
     return entries
+
+
+def record_dedup_key(it):
+    """A stable de-dup key for an activity record. Uses the API `id` when present;
+    otherwise a deterministic SHA-256 over the record's identifying fields, so that
+    multiple id-less records don't all collapse into a single `None` key (which
+    would silently drop every id-less activity but the first)."""
+    rid = it.get("id")
+    if rid is not None:
+        return rid
+    media_ids = sorted(ident for _, _, ident, _ in collect_media_entries(it))
+    canonical = json.dumps({
+        "type": it.get("activity_type"),
+        "when": it.get("activity_time") or it.get("activity_date"),
+        "kids": sorted(str(k) for k in (it.get("kid_ids") or [])),
+        "media": media_ids,
+        "comment": it.get("comment"),
+    }, sort_keys=True, default=str)
+    return "sha:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
 
 def fetch_all_records(session, base, kids, start_date, end_date,
@@ -736,7 +943,7 @@ def fetch_all_records(session, base, kids, start_date, end_date,
                     type_counts[atype] = type_counts.get(atype, 0) + 1
                     if debug:
                         type_samples.setdefault(atype, it)
-                    rid = it.get("id")
+                    rid = record_dedup_key(it)
                     if rid not in record_ids:
                         record_ids.add(rid)
                         records.append(it)
@@ -749,34 +956,46 @@ def fetch_all_records(session, base, kids, start_date, end_date,
     if debug and out_dir and type_samples:
         dump_path = os.path.join(out_dir, "debug_activities.json")
         try:
-            with open(dump_path, "w", encoding="utf-8") as fh:
-                json.dump({"counts": type_counts, "samples": type_samples},
-                          fh, indent=2, default=str)
+            # Scrub signed/expiring URLs from the samples just like feed.json — the
+            # debug dump embeds real activity objects with signed media links.
+            payload = scrub_signed_urls({"counts": type_counts, "samples": type_samples})
+            write_private_json(dump_path, payload)
             print(f"  [debug] wrote one sample of each activity type to {dump_path}")
         except Exception as e:
             print(f"  [debug] could not write dump: {e}")
     return records
 
 
-# Markers that identify a signed/expiring CDN URL query we should not archive.
-_SIGNING_MARKERS = ("Signature=", "Expires=", "X-Amz-", "Key-Pair-Id=", "token=")
-
-
 def scrub_signed_urls(obj):
-    """Recursively drop signed query strings from URLs (deep-copies the data).
+    """Recursively strip the query string AND fragment from every http(s) URL
+    (deep-copies the data).
 
-    feed.json embeds full-resolution media URLs with time-limited signatures; we
-    strip those so a shared archive can't hand out working links to the media.
-    The local path is preserved, which is all the scrapbook rebuild needs."""
+    feed.json / debug dumps embed full-resolution media URLs whose query carries
+    time-limited signatures or tokens (`Signature=`, `X-Amz-*`, `token=`, ...). We
+    drop the ENTIRE query+fragment — unconditionally, regardless of parameter name
+    or capitalization — so a shared archive can never hand out a working link to
+    the media. This is safe because the scrapbook only needs the URL's path (via
+    `id_from_url`, which already ignores the query) to find the local file."""
     if isinstance(obj, dict):
         return {k: scrub_signed_urls(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [scrub_signed_urls(v) for v in obj]
-    if isinstance(obj, str) and obj.startswith("http") and "?" in obj:
-        base, query = obj.split("?", 1)
-        if any(m in query for m in _SIGNING_MARKERS):
-            return base
+    if isinstance(obj, str) and obj.startswith(("http://", "https://")):
+        return obj.split("?", 1)[0].split("#", 1)[0]
     return obj
+
+
+def write_private_json(path, data):
+    """Write `data` as JSON, restricting the file to the owner on POSIX. These
+    JSON files (feed.json, debug dump) hold a child's activity history, so we
+    keep them out of a group-/world-readable default umask where we can."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, default=str)
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
 
 def in_range(dt, since_dt, until_dt):
@@ -816,8 +1035,8 @@ def class_spans(records):
     return spans
 
 
-def download_records(session, records, out_dir, since_dt, until_dt, stats,
-                     seen=None, overwrite=False, kinds_filter=None):
+def download_records(session, media_session, records, out_dir, since_dt, until_dt,
+                     stats, seen=None, overwrite=False, kinds_filter=None):
     """Download the photos/videos attached to the given activity records."""
     total = len(records)
     for idx, it in enumerate(records):
@@ -825,8 +1044,8 @@ def download_records(session, records, out_dir, since_dt, until_dt, stats,
             if kinds_filter and kind not in kinds_filter:
                 continue
             default_ext = ".mp4" if kind == "video" else ".jpg"
-            save_media(session, media_url, dt, kind, ident, out_dir, since_dt,
-                       stats, default_ext, seen=seen, overwrite=overwrite,
+            save_media(session, media_session, media_url, dt, kind, ident, out_dir,
+                       since_dt, stats, default_ext, seen=seen, overwrite=overwrite,
                        until_dt=until_dt)
         if total and (idx + 1) % 200 == 0:
             print(f"  ...scanned {idx + 1}/{total} activities "
@@ -1021,6 +1240,11 @@ def run(args):
 
     session = requests.Session()
     session.headers.update({"User-Agent": "procare-media-downloader/1.0"})
+    # A SEPARATE, unauthenticated session for media downloads. Signed CDN/S3 URLs
+    # authorize themselves; sending them the bearer token would leak it off-domain.
+    # `download_file` uses the authed `session` only for allowlisted Procare hosts.
+    media_session = requests.Session()
+    media_session.headers.update({"User-Agent": "procare-media-downloader/1.0"})
 
     print("Logging in...")
     base, _ = authenticate(session, email, password)
@@ -1060,11 +1284,10 @@ def run(args):
 
     import scrapbook
 
-    # Build one "section" per child. Each child gets its own date-range choice,
-    # its own class name, and (when there are siblings) its own media subfolder.
+    # Build one "section" per child from the ACTIVITY feed. Each child gets its own
+    # date-range choice, its own class name, and (with siblings) its own subfolder.
     multi = len(kids_meta) > 1
     sections, used_folders = [], set()
-    gallery_seen = set()  # shared across kids so an unscoped gallery isn't duplicated per child
     for kid in kids_meta:
         kid_id = kid.get("id")
         who = scrapbook.first_name(kid) or "My Child"
@@ -1083,14 +1306,6 @@ def run(args):
                 print(f"{who}: {lo} to {hi}\n")
 
         sel = [r for r in kid_records if in_range(find_capture_dt(r), c_since, c_until)]
-
-        # Some daycares upload straight into the gallery and never create an
-        # activity record at all (or do both, inconsistently). Always check the
-        # gallery too, and merge in only what the activity feed didn't already
-        # find, so a photo posted both ways doesn't get counted/downloaded twice.
-        gallery_entries = fetch_gallery_media(session, base, kid_id, reauth=reauth)
-        sel = merge_gallery_media(sel, gallery_entries, c_since, c_until, kid_id, gallery_seen)
-
         cls = args.class_name or picked or scrapbook.detect_class_name(sel)
 
         folder = ""
@@ -1100,8 +1315,25 @@ def run(args):
                 folder = f"{folder} ({kid_id[:6]})" if kid_id else f"{folder} (2)"
             used_folders.add(folder)
 
-        sections.append({"name": who, "class_name": cls, "folder": folder,
+        sections.append({"name": who, "class_name": cls, "folder": folder, "kid_id": kid_id,
                          "records": sel, "since": c_since, "until": c_until})
+
+    # Fold in the gallery. Daycares that upload straight to the gallery (bypassing
+    # activities) expose media here; the gallery is account-wide and child-agnostic
+    # (it ignores kid_id), so distribute_gallery attributes each item where it can,
+    # dedups against what the activity feed already found, and routes anything it
+    # can't attribute to a shared bucket instead of an arbitrary child.
+    gallery_meta = collect_gallery(session, base, [k.get("id") for k in kids_meta], reauth=reauth)
+    shared_records = distribute_gallery(gallery_meta, sections, since_dt, until_dt)
+    if shared_records:
+        # Only appears with siblings (single-child galleries fold into that child).
+        folder = scrapbook.safe_name("Shared Gallery")
+        used_folders.add(folder)
+        sections.append({"name": "Shared Gallery", "class_name": None, "folder": folder,
+                         "kid_id": None, "records": shared_records,
+                         "since": since_dt, "until": until_dt, "shared": True})
+        print(f"\n{len(shared_records)} gallery item(s) not tied to a specific child "
+              f"-> 'Shared Gallery'.")
 
     if download:
         kinds_filter = {"video"} if args.videos_only else None
@@ -1109,12 +1341,13 @@ def run(args):
             m_dir = scrapbook.media_root(out_dir, s["folder"])
             os.makedirs(m_dir, exist_ok=True)
             if multi:
-                print(f"\nDownloading {s['name']}'s media — {len(s['records'])} activities...")
+                print(f"\nDownloading {s['name']}'s media — {len(s['records'])} item(s)...")
             else:
-                print(f"Downloading media from {len(s['records'])} activities...")
-            # Fresh dedup set per child so shared media lands in each child's folder.
-            download_records(session, s["records"], m_dir, s["since"], s["until"], stats,
-                             seen=set(), overwrite=args.overwrite, kinds_filter=kinds_filter)
+                print(f"Downloading media from {len(s['records'])} item(s)...")
+            # Fresh dedup set per section so shared media lands in each folder.
+            download_records(session, media_session, s["records"], m_dir, s["since"],
+                             s["until"], stats, seen=set(), overwrite=args.overwrite,
+                             kinds_filter=kinds_filter)
         ranged = any(s["since"] or s["until"] for s in sections)
         _print_download_summary(stats, out_dir, ranged)
 
@@ -1124,11 +1357,11 @@ def run(args):
                      "sections": [{"name": s["name"], "class_name": s["class_name"],
                                    "folder": s["folder"], "records": s["records"]}
                                   for s in sections]}
-        with open(feed_path, "w", encoding="utf-8") as fh:
-            json.dump(scrub_signed_urls(feed_data), fh, indent=2, default=str)
+        # Strip signed/expiring query strings and keep the file owner-only (POSIX).
+        write_private_json(feed_path, scrub_signed_urls(feed_data))
         pages = scrapbook.build_scrapbook(
-            [{"name": s["name"], "class_name": s["class_name"],
-              "folder": s["folder"], "records": s["records"]} for s in sections],
+            [{"name": s["name"], "class_name": s["class_name"], "folder": s["folder"],
+              "records": s["records"], "shared": s.get("shared", False)} for s in sections],
             out_dir, school=school)
         announce_scrapbook(out_dir, pages)
 
