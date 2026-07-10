@@ -451,18 +451,29 @@ def build_scrapbook(sections, out_dir, school=None):
         total += _build_section(s["records"], p_dir, m_dir, child_landing,
                                 s["name"], school, s.get("class_name"))
         links.append((s["name"], s.get("class_name"),
-                      rel_href(child_landing, out_dir), len(s["records"])))
+                      rel_href(child_landing, out_dir), len(s["records"]),
+                      s.get("shared", False)))
 
     write_css(pages_root(out_dir))
-    items = "\n".join(
-        f'<li><a href="{rel}">{esc(name)}</a>'
-        f'<span class="sum">{esc(cls or "")}{" · " if cls else ""}{n:,} moments</span></li>'
-        for name, cls, rel, n in links)
+
+    def _index_item(name, cls, rel, n, shared):
+        if shared:
+            # A gallery bucket, not a child — describe it as items, not "moments".
+            sub = f"{n:,} shared item{'' if n == 1 else 's'} not tied to one child"
+        else:
+            sub = f'{esc(cls or "")}{" · " if cls else ""}{n:,} moments'
+        return f'<li><a href="{rel}">{esc(name)}</a><span class="sum">{sub}</span></li>'
+
+    items = "\n".join(_index_item(*link) for link in links)
+    # If a non-child (Shared Gallery) section is present, the index isn't purely
+    # "choose a child" — soften the label so it reads naturally either way.
+    any_shared = any(link[4] for link in links)
+    subtitle = "Choose a child or the shared gallery" if any_shared else "Choose a child"
     school_line = f'<div class="school">{esc(school)}</div>' if school else ""
     body = f"""<header class="top">
   {school_line}
   <h1>Procare Scrapbook</h1>
-  <div class="who">Choose a child</div>
+  <div class="who">{subtitle}</div>
 </header>
 <ul class="months">
 {items}

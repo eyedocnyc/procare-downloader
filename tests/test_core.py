@@ -137,39 +137,97 @@ def test_choose_scope_prompts_even_single_class():
     assert s == datetime(2025, 10, 1) and u == datetime(2025, 12, 31, 23, 59, 59) and name is None
 
 
-def test_gallery_only_becomes_record():
-    entries = [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
-    sel = pd.merge_gallery_media([], entries, None, None, "k1", set())
-    assert len(sel) == 1
-    rec = sel[0]
+# --- gallery routing helpers (mirror the structures collect_gallery produces) --- #
+def _section(kid_id, records=None, folder="", since=None, until=None):
+    return {"name": f"kid-{kid_id}", "class_name": None, "kid_id": kid_id,
+            "folder": folder, "records": list(records or []), "since": since, "until": until}
+
+
+def _gitem(kind, ident, dt, assoc=(), returned_for=()):
+    url = f"https://cdn/{'photos' if kind == 'photo' else 'attachments'}/files/{ident}/main/{ident}"
+    url += ".jpg" if kind == "photo" else ""
+    return (kind, ident), {"url": url, "dt": dt, "assoc": set(assoc),
+                           "returned_for": set(returned_for)}
+
+
+def test_gallery_entry_roundtrip():
+    rec = pd.gallery_entry_to_record("https://cdn/photos/files/g1/main/g1.jpg",
+                                     datetime(2025, 6, 1, 10), "g1", "photo", "k1")
     assert rec["activity_type"] == "photo_activity" and rec["kid_ids"] == ["k1"]
-    got = pd.collect_media_entries(rec)
-    assert got == [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
+    assert pd.collect_media_entries(rec) == [
+        ("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
+    # Video: open-uri URL has no extension, so it must be detectable by key name.
+    vrec = pd.gallery_entry_to_record("https://cdn/attachments/files/v9/original/open-uri-x",
+                                      datetime(2025, 6, 1, 11), "v9", "video", "k1")
+    got = pd.collect_media_entries(vrec)
+    assert got == [("https://cdn/attachments/files/v9/original/open-uri-x",
+                    datetime(2025, 6, 1, 11), "v9", "video")]
+
+
+def test_gallery_item_kids_extraction():
+    assert pd.gallery_item_kids({"kid_ids": ["a", "b"]}) == ["a", "b"]
+    assert pd.gallery_item_kids({"kid_id": 7}) == ["7"]
+    assert pd.gallery_item_kids({"participants": [{"id": "x"}, {"nope": 1}]}) == ["x"]
+    assert pd.gallery_item_kids({"caption": "hi"}) == []       # the real, untagged case
+
+
+def test_gallery_single_child_folds_in():
+    s = _section("k1")
+    meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10), returned_for={"k1"})])
+    shared = pd.distribute_gallery(meta, [s], None, None)
+    assert shared == [] and len(s["records"]) == 1
+    assert pd.collect_media_entries(s["records"][0])[0][2] == "v1"
+
+
+def test_gallery_no_kid_profiles_folds_in():
+    s = _section(None)                                        # single account-wide section
+    meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10))])
+    shared = pd.distribute_gallery(meta, [s], None, None)
+    assert shared == [] and len(s["records"]) == 1
+
+
+def test_gallery_multichild_agnostic_goes_shared():
+    # The real 2-child case: one global list returned identically for every kid,
+    # no per-item child info -> a single Shared Gallery bucket, not dumped on kid1.
+    s1, s2 = _section("k1"), _section("k2")
+    meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10), returned_for={"k1", "k2"})])
+    shared = pd.distribute_gallery(meta, [s1, s2], None, None)
+    assert len(shared) == 1
+    assert s1["records"] == [] and s2["records"] == []        # not assigned to either child
+    assert shared[0]["kid_ids"] == []
 
 
 def test_gallery_dedups_against_activity_feed():
-    # Same photo already present via the activity feed -> gallery copy is dropped.
-    rec = photo_activity("k1", "2025-06-01", "p1")
-    entries = [("https://cdn/photos/files/p1/main/p1.jpg", datetime(2025, 6, 1, 10), "p1", "photo"),
-               ("https://cdn/photos/files/p2/main/p2.jpg", datetime(2025, 6, 2, 10), "p2", "photo")]
-    sel = pd.merge_gallery_media([rec], entries, None, None, "k1", set())
-    assert len(sel) == 2                                   # p1 stays deduped, p2 is new
-    assert sum(1 for r in sel if r.get("id") == "gallery-photo-p2") == 1
-    assert not any(r.get("id") == "gallery-photo-p1" for r in sel)
+    # A video already present via kid1's activity feed is NOT re-added from the gallery.
+    act = video_activity("k1", "2025-06-01", "v1")
+    s1, s2 = _section("k1", [act]), _section("k2")
+    meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10), returned_for={"k1", "k2"})])
+    shared = pd.distribute_gallery(meta, [s1, s2], None, None)
+    assert shared == []                                       # already known via activities
+    assert len(s1["records"]) == 1 and s2["records"] == []
 
 
-def test_gallery_dedups_across_kids_when_unscoped():
-    entries = [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1, 10), "g1", "photo")]
-    shared_seen = set()
-    sel1 = pd.merge_gallery_media([], entries, None, None, "k1", shared_seen)
-    sel2 = pd.merge_gallery_media([], entries, None, None, "k2", shared_seen)
-    assert len(sel1) == 1 and len(sel2) == 0                # k2 doesn't get k1's item twice
+def test_gallery_explicit_kids_attributed_to_each():
+    s1, s2 = _section("k1"), _section("k2")
+    meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10), assoc={"k1", "k2"})])
+    shared = pd.distribute_gallery(meta, [s1, s2], None, None)
+    assert shared == []
+    assert len(s1["records"]) == 1 and len(s2["records"]) == 1
+
+
+def test_gallery_per_child_subset_attributed():
+    # If the endpoint returns an item for only one kid, attribute it to that kid.
+    s1, s2 = _section("k1"), _section("k2")
+    meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10), returned_for={"k1"})])
+    shared = pd.distribute_gallery(meta, [s1, s2], None, None)
+    assert shared == [] and len(s1["records"]) == 1 and s2["records"] == []
 
 
 def test_gallery_respects_date_range():
-    entries = [("https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 1, 1, 10), "g1", "photo")]
-    sel = pd.merge_gallery_media([], entries, datetime(2025, 6, 1), None, "k1", set())
-    assert sel == []
+    s = _section("k1", since=datetime(2025, 6, 1))
+    meta = dict([_gitem("video", "v1", datetime(2025, 1, 1, 10), returned_for={"k1"})])
+    shared = pd.distribute_gallery(meta, [s], datetime(2025, 6, 1), None)
+    assert shared == [] and s["records"] == []               # out of range, dropped
 
 
 def test_first_name():
@@ -217,13 +275,83 @@ def test_layout_multi_child_isolated():
 def test_scrub_signed_urls():
     rec = {"activiable": {"id": "p1",
            "main_url": "https://cdn/photos/files/p1/main/p1.jpg?Expires=99&Signature=SECRET&Key-Pair-Id=K"},
-           "plain": "https://cdn/x/y.jpg", "nested": ["https://cdn/z?token=abc"]}
+           "lower": "https://cdn/a/b.jpg?signature=secret&token=abc",
+           "amz": "https://cdn/c/d.jpg?X-Amz-Signature=zzz",
+           "amz_lower": "https://cdn/c/e.jpg?x-amz-signature=zzz",
+           "unknown_param": "https://cdn/f/g.jpg?foo=bar",
+           "fragment": "https://cdn/h/i.jpg#secretfrag",
+           "plain": "https://cdn/x/y.jpg",
+           "nested": [{"deep": "https://cdn/z/w.jpg?token=abc#frag"}]}
     out = pd.scrub_signed_urls(rec)
-    assert out["activiable"]["main_url"] == "https://cdn/photos/files/p1/main/p1.jpg"  # signed stripped
-    assert "Signature" not in str(out) and "token=" not in str(out)
-    assert out["plain"] == "https://cdn/x/y.jpg"                                       # unsigned untouched
-    # the local-file lookup still works after scrubbing (id_from_url ignores query)
+    assert out["activiable"]["main_url"] == "https://cdn/photos/files/p1/main/p1.jpg"
+    assert out["lower"] == "https://cdn/a/b.jpg"                    # case-insensitive
+    assert out["amz"] == "https://cdn/c/d.jpg"
+    assert out["amz_lower"] == "https://cdn/c/e.jpg"
+    assert out["unknown_param"] == "https://cdn/f/g.jpg"           # ANY query dropped
+    assert out["fragment"] == "https://cdn/h/i.jpg"               # fragment dropped
+    assert out["plain"] == "https://cdn/x/y.jpg"                   # already clean
+    assert out["nested"][0]["deep"] == "https://cdn/z/w.jpg"      # nested dict in list
+    blob = str(out)
+    for leak in ("Signature", "signature", "token=", "X-Amz", "secretfrag", "foo=bar"):
+        assert leak not in blob
+    # local-file lookup still works after scrubbing (id_from_url ignores query)
     assert pd.id_from_url(out["activiable"]["main_url"]) == "p1"
+
+
+def test_auth_host_allowlist():
+    # Token goes ONLY to the exact Procare API hosts, over https.
+    assert pd.is_procare_host("https://api-school.procareconnect.com/api/web/parent/photos/")
+    assert pd.is_procare_host("https://api-school.kinderlime.com/x") is True
+    # A signed CDN/S3 link must NOT be treated as a Procare host.
+    assert pd.is_procare_host("https://d123.cloudfront.net/v/x.mp4?Signature=z") is False
+    assert pd.is_procare_host("https://s3.amazonaws.com/bucket/x.jpg") is False
+    # Deceptive look-alike host (suffix attack) is rejected.
+    assert pd.is_procare_host("https://api-school.procareconnect.com.attacker.test/x") is False
+    # http:// (non-TLS) is never a trusted host, even for the real domain.
+    assert pd.is_procare_host("http://api-school.procareconnect.com/x") is False
+    # A query string can't sneak the real host past the check either way.
+    assert pd.is_procare_host("https://evil.test/?x=api-school.procareconnect.com") is False
+
+
+def test_error_page_rejected():
+    assert pd._looks_like_error_page("text/html", b"<!DOCTYPE html>") is True
+    assert pd._looks_like_error_page("application/json; charset=utf-8", b'{"error"') is True
+    assert pd._looks_like_error_page(None, b"  <html><body>nope") is True
+    # Real media is accepted, including formats sniff_ext doesn't recognize.
+    assert pd._looks_like_error_page("image/jpeg", b"\xff\xd8\xff\x00") is False
+    assert pd._looks_like_error_page("video/x-matroska", b"\x1aE\xdf\xa3") is False  # .mkv
+    assert pd._looks_like_error_page(None, b"\x00\x00\x00\x18ftypmp42") is False
+
+
+def test_stable_media_ident_deterministic():
+    u = "https://cdn/attachments/files/x/original/open-uri-random?Signature=changes"
+    # Deterministic across calls, ignores the (changing) query, never "None"/hash().
+    a = pd.stable_media_ident(u)
+    b = pd.stable_media_ident("https://cdn/attachments/files/x/original/open-uri-random?Signature=other")
+    assert a == b and a and a != "None" and len(a) == 20
+
+
+def test_idless_records_stay_distinct():
+    # Two activities with no API id must not collapse into one dedup key.
+    base = {"activity_type": "note_activity", "activity_time": "2025-06-01T09:00:00-04:00",
+            "kid_ids": ["k1"]}
+    a = dict(base, comment="first")
+    b = dict(base, comment="second")
+    assert pd.record_dedup_key(a) != pd.record_dedup_key(b)
+    # ...but the same content yields the same (stable) key, not a random one.
+    assert pd.record_dedup_key(dict(base, comment="first")) == pd.record_dedup_key(a)
+
+
+def test_idless_media_stay_distinct():
+    # Two photos recognized as media (end in .jpg) but with a blank filename stem
+    # must get distinct, stable idents — never both the literal "None".
+    e1 = pd.collect_media_entries(
+        {"activiable": {"id": None, "main_url": "https://cdn/one/.jpg"}})
+    e2 = pd.collect_media_entries(
+        {"activiable": {"id": None, "main_url": "https://cdn/two/.jpg"}})
+    assert e1 and e2
+    id1, id2 = e1[0][2], e2[0][2]
+    assert id1 != id2 and "None" not in (id1, id2)
 
 
 def test_lightbox_and_summary():

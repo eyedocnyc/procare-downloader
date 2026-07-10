@@ -35,7 +35,10 @@ Most people should just grab the prebuilt app:
   (one time only). *(Older Intel Macs aren't supported by the prebuilt app — run from source instead.)*
 
 Each release also includes a `.sha256` checksum file if you'd like to verify your download
-(`sha256sum ProcareDownloader-Windows.zip` on Windows/Linux, `shasum -a 256 …` on Mac).
+(`sha256sum ProcareDownloader-Windows.zip` on Windows/Linux, `shasum -a 256 …` on Mac). Note a
+checksum only proves your download matches the file published beside it on the release page — it
+confirms the download wasn't corrupted or swapped in transit, not who authored it. (The apps are
+unsigned, so Windows SmartScreen / macOS Gatekeeper will still warn on first launch.)
 
 Then just follow the prompts:
 
@@ -136,12 +139,35 @@ Both call `package_app.py` to assemble the shareable zip.
 - **From source: `python`/`pip` not recognized.** Python isn't on your PATH — reinstall and tick
   "Add Python to PATH", or try `py` instead of `python`.
 
+## Security & privacy
+
+- **Your password** is entered at a hidden prompt, used only to log in to Procare, and is never
+  saved or written anywhere.
+- **Your login token goes only to Procare.** The tool attaches your session token *exclusively* to
+  requests to Procare's own API hosts (`api-school.procareconnect.com` / `api-school.kinderlime.com`).
+  The actual photos and videos are downloaded from Procare's CDN over separate, **unauthenticated**
+  requests — those links are already signed, so your token is never sent to the CDN or anywhere
+  off-domain.
+- **The output is unencrypted and sensitive.** The `Media` folder, the `Scrapbook` HTML, and
+  `Scrapbook/feed.json` contain your child's photos, videos, names, and daily records in the clear.
+  Keep the folder somewhere private, and think before emailing it or sharing the ZIP publicly —
+  anyone with the files has everything in them. (`feed.json` has expiring/signed media links stripped
+  out, so a shared archive can't hand out working URLs, but the local media itself is still right
+  there in the folder.)
+- **`--debug` writes extra sensitive data.** It dumps sample activity records to
+  `debug_activities.json` for troubleshooting. Signed URLs are stripped from it, but it still
+  contains real activity content — delete it when you're done, and don't share it casually.
+- **2FA / SSO accounts aren't supported.** Login is email + password only; if your account requires
+  a verification code or signs in via Google/Apple, the tool can't authenticate.
+
 ## Notes & limitations
 
 - Uses Procare's private API (no official public API exists for this); it may break if Procare
   changes their backend.
 - Only downloads what your own parent account can see — photos your child is tagged in, plus the
-  activity feed for your child.
+  activity feed for your child. Some daycares upload videos to a shared gallery that isn't tagged
+  per child; with more than one child on the account, those land in a **"Shared Gallery"** section
+  rather than being guessed into one child's scrapbook.
 - The apps are unsigned, hence the one-time SmartScreen/Gatekeeper prompts. Code signing requires
   paid developer certificates and isn't worth it for a personal tool.
 

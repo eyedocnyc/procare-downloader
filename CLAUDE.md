@@ -20,8 +20,11 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 - `package_app.py` — assembles the shareable zip from a PyInstaller build (Win + Mac).
 - `build_exe.bat` / `build_mac.command` — local one-click builds.
 - `START HERE (Windows).bat` / `START HERE (Mac).command` — launchers for source users.
-- `.github/workflows/build.yml` — CI: runs tests, builds Win + Mac apps, publishes a Release on tags.
+- `.github/workflows/ci.yml` — PR/`main` CI: byte-compile + regression tests on Python 3.9 and 3.12.
+- `.github/workflows/build.yml` — release CI: builds Win + Mac apps, publishes a Release on tags only.
 - `tests/test_core.py` — self-contained regression tests (`python tests/test_core.py`, no pytest).
+- `tools/probe_gallery.py` — read-only diagnostic that reports the gallery API's per-child shape
+  (redacted: item ids + key names only). Not shipped in releases; used to design the gallery handling.
 - `docs/preview.png` + `docs/sample/` — README screenshot and its anonymized source.
 
 ## Procare API (reverse-engineered; no official public API)
@@ -55,20 +58,32 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
   its real content (this is how we caught PNG posters saved as `.mp4`).
 - **Don't read ids as dates.** `_parse_dt` rejects numbers outside a plausible epoch range; `find_capture_dt`
   only falls back to string values — otherwise an `id` like `50` becomes "1970".
-- **Downloads keep the session auth header.** `requests` drops it automatically on cross-host redirects
-  (to the CDN/S3), so signed links still work. Do NOT manually strip it (that broke Procare-proxied URLs).
+- **The bearer token is host-allowlisted; media uses a separate unauthenticated session.** Downloads
+  send `Authorization` only to exact Procare API hosts (`is_procare_host`, `PROCARE_AUTH_HOSTS`) — signed
+  CDN/S3 links authorize themselves, so sending the token there would leak it off-domain. `download_file`
+  picks the authed `session` iff `is_procare_host(url)`, else the unauthenticated `media_session`; it also
+  refuses non-`https` media URLs. This is belt-and-suspenders with `requests` dropping auth on cross-host
+  redirects (which still covers a Procare URL that 302s to S3). Do NOT collapse the two sessions back
+  together, and do NOT send auth to the CDN "to be safe" — that's the leak this prevents.
 - **No browser/hosted version is feasible.** A hosted web app can't call Procare's API (CORS: the API only
   allows Procare's own origin). Only in-page code (extension/userscript/bookmarklet reusing the logged-in
   session) could work. The desktop app is the supported path.
 - **Activities and gallery are two independent, overlapping sources.** Some daycares post everything as
   activities, some skip activities and upload straight to the gallery, and some do both for the same
-  photo/video. We always fetch both (`fetch_all_records` + `fetch_gallery_media` per child) and merge
-  with `merge_gallery_media`, which wraps gallery-only items into activity-shaped records
-  (`gallery_entry_to_record`, `activity_type` `photo_activity`/`video_activity`) so they flow through the
-  normal download/scrapbook path. Dedup key is the same `(kind, ident)` used everywhere else — a video's
-  `ident` is its resource id (not the unstable URL), a photo's is `id_from_url` — so an item posted both
-  ways is kept once. `gallery_seen` is shared across all of a run's children in case an account's gallery
-  endpoints ignore `kid_id` and return the same items for every child.
+  photo/video. We always fetch both: `fetch_all_records` (activity feed, correctly tagged per child via
+  `kid_ids`) and the gallery. **The gallery is account-wide and child-agnostic** — verified against a real
+  2-child account: `parent/videos/` returns one global list identical for every kid (it ignores `kid_id`)
+  and gallery items carry NO child-association field. `parent/photos/` is empty on that account, so we
+  treat gallery photos and videos symmetrically. `collect_gallery` queries once per kid and records, per
+  `(kind, ident)`, which kids' requests returned it; `distribute_gallery` then: dedups against every
+  child's activity media (same `(kind, ident)` key — video ident = resource id, photo = `id_from_url`),
+  honors any explicit `kid_ids` if present (`gallery_item_kids`, absent today but future-proof), attributes
+  an item to the single kid whose query returned it if the endpoint discriminates, and otherwise treats it
+  as account-wide → the sole child (single-child) or a dedicated **"Shared Gallery"** section (multi-child,
+  `shared: True`). Do NOT reintroduce the old global `gallery_seen`/`merge_gallery_media` that dumped every
+  untagged gallery item on child 1. `gallery_entry_to_record` puts a video's URL under `video_file_url`
+  (open-uri URLs have no extension, so `collect_media_urls` can only detect them by key name) and a photo's
+  under `main_url`.
 
 ## Output layout
 
@@ -87,14 +102,18 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
 
 ## Security / privacy
 
-- `feed.json` is passed through `scrub_signed_urls` before writing — signed/expiring CDN query
-  strings (`Signature=`, `Expires=`, `X-Amz-`, `Key-Pair-Id=`, `token=`) are stripped so a shared
-  archive can't hand out working links to the media. The local-file lookup still works because
-  `id_from_url` ignores the query.
+- `feed.json` (and the `--debug` `debug_activities.json`) are passed through `scrub_signed_urls`
+  before writing — it strips the **entire query string and fragment** from every http(s) URL,
+  unconditionally (not a denylist of known signing params), so no signed/expiring/token'd link can
+  leak into a shared archive regardless of param name or casing. The local-file lookup still works
+  because `id_from_url` ignores the query. Both files are written via `write_private_json`, which
+  also `chmod 0600`s them on POSIX (they hold a child's activity history).
 - `fetch_json` re-authenticates once on 401/403 via the `reauth` closure (guards long feed walks
   if the token expires). Media downloads use signed URLs and aren't affected.
 - Releases include per-zip **SHA-256** files: `package_app.py` writes `*.zip.sha256`; the workflow
-  attaches them. Apps are unsigned (paid certs not worth it) — that's the trust mechanism.
+  attaches them. These prove a download matches the file published beside it (integrity), NOT who
+  authored it (authenticity) — don't describe them as proof of publisher. Apps are unsigned (paid
+  certs not worth it), hence the one-time SmartScreen/Gatekeeper prompts.
 
 ## Behavior notes
 
