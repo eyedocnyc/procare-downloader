@@ -23,8 +23,6 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 - `.github/workflows/ci.yml` — PR/`main` CI: byte-compile + regression tests on Python 3.9 and 3.12.
 - `.github/workflows/build.yml` — release CI: builds Win + Mac apps, publishes a Release on tags only.
 - `tests/test_core.py` — self-contained regression tests (`python tests/test_core.py`, no pytest).
-- `tools/probe_gallery.py` — read-only diagnostic that reports the gallery API's per-child shape
-  (redacted: item ids + key names only). Not shipped in releases; used to design the gallery handling.
 - `docs/preview.png` + `docs/sample/` — README screenshot and its anonymized source.
 
 ## Procare API (reverse-engineered; no official public API)
