@@ -21,6 +21,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import procare_download as pd          # noqa: E402
 import scrapbook as sb                 # noqa: E402
+import updater as up                   # noqa: E402
+import hashlib as _hashlib             # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -369,6 +371,88 @@ def test_lightbox_and_summary():
     mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
     month = open(os.path.join(out, "Scrapbook", mp), encoding="utf-8").read()
     assert "lightbox" in month and "classList.contains('media')" in month
+
+
+# --------------------------------------------------------------------------- #
+# self-updater
+# --------------------------------------------------------------------------- #
+def test_version_parsing_and_compare():
+    assert up.parse_version("v1.9") == (1, 9)
+    assert up.parse_version("1.10.2") == (1, 10, 2)
+    assert up.parse_version("v2.0-beta") == (2,)            # stops at non-numeric segment
+    assert up.parse_version("junk") == () and up.parse_version(None) == ()
+    assert up.is_newer("v1.10", "1.9") is True              # 1.10 > 1.9 numerically
+    assert up.is_newer("v1.9", "1.9") is False              # equal
+    assert up.is_newer("1.8", "1.9") is False               # older
+    assert up.is_newer("", "1.9") is False                  # unparseable never newer
+
+
+def test_app_version_matches_engine():
+    # The engine constant is what the updater compares against; keep them coupled.
+    assert isinstance(pd.APP_VERSION, str) and up.parse_version(pd.APP_VERSION)
+
+
+def test_platform_asset_selection():
+    import platform
+    orig = platform.system
+    try:
+        platform.system = lambda: "Windows"
+        assert up.platform_asset() == ("ProcareDownloader-Windows.zip",
+                                       "ProcareDownloader-Windows/ProcareDownloader.exe")
+        platform.system = lambda: "Darwin"
+        assert up.platform_asset() == ("ProcareDownloader-Mac.zip",
+                                       "ProcareDownloader-Mac/ProcareDownloader")
+        platform.system = lambda: "Linux"
+        assert up.platform_asset() is None                  # no binary published
+    finally:
+        platform.system = orig
+
+
+def test_sha256_file_parse_and_verify():
+    blob = b"pretend-zip-bytes"
+    digest = _hashlib.sha256(blob).hexdigest()
+    assert up.parse_sha256_file(f"{digest}  ProcareDownloader-Mac.zip\n") == digest
+    assert up.parse_sha256_file("not a hash") is None
+    tmp = tempfile.mkdtemp(prefix="up_")
+    p = os.path.join(tmp, "z.zip")
+    open(p, "wb").write(blob)
+    assert up.sha256_of(p) == digest                        # matches
+    open(p, "wb").write(b"tampered")
+    assert up.sha256_of(p) != digest                        # mismatch detected
+
+
+def test_find_asset():
+    rel = {"tag_name": "v2.0", "assets": [
+        {"name": "ProcareDownloader-Mac.zip", "browser_download_url": "https://x/mac.zip"},
+        {"name": "ProcareDownloader-Mac.zip.sha256", "browser_download_url": "https://x/mac.zip.sha256"}]}
+    assert up.find_asset(rel, "ProcareDownloader-Mac.zip") == "https://x/mac.zip"
+    assert up.find_asset(rel, "ProcareDownloader-Mac.zip.sha256") == "https://x/mac.zip.sha256"
+    assert up.find_asset(rel, "missing") is None
+    # a non-https url is rejected (defense against a tampered release listing)
+    assert up.find_asset({"assets": [{"name": "z", "browser_download_url": "http://x/z"}]}, "z") is None
+
+
+def test_self_update_noop_from_source():
+    # Not frozen (running from source) -> never attempts a swap, never raises,
+    # even when a newer release exists.
+    orig_fetch, orig_apply = up.fetch_latest, up.apply_update
+    calls = {"apply": 0}
+    up.fetch_latest = lambda *a, **k: {"tag_name": "v999.0", "assets": []}
+    up.apply_update = lambda *a, **k: calls.__setitem__("apply", calls["apply"] + 1) or True
+    try:
+        up.self_update("1.9")                # sys.frozen is False under the test runner
+    finally:
+        up.fetch_latest, up.apply_update = orig_fetch, orig_apply
+    assert calls["apply"] == 0
+
+
+def test_self_update_silent_when_offline():
+    orig = up.fetch_latest
+    up.fetch_latest = lambda *a, **k: None   # simulate offline / rate-limited
+    try:
+        up.self_update("1.9")                # must not raise
+    finally:
+        up.fetch_latest = orig
 
 
 def main():

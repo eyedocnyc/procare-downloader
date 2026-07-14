@@ -49,6 +49,15 @@ Then just follow the prompts:
 Everything is saved next to the app in a `procare_media` folder. Open **`Open Scrapbook.html`** to
 browse it.
 
+### Staying up to date
+
+On launch the app checks GitHub for a newer release. If there is one, it tells you and asks whether
+to update — say yes and it downloads the new version, **verifies it against the published SHA-256**,
+and swaps itself in place, then restarts on the new version. (Because the app downloads the update
+itself, the updated app usually launches without the one-time SmartScreen/Gatekeeper prompt.) Pass
+`--no-update-check` to skip the check, or `--version` to see which version you have. Running from
+source? The check just points you at the latest release / `git pull` instead.
+
 ---
 
 ## What you get

@@ -17,6 +17,7 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 
 - `procare_download.py` — the engine: auth, feed fetch, media download, CLI + guided menu.
 - `scrapbook.py` — HTML scrapbook generator (imported by the engine).
+- `updater.py` — startup self-update: checks GitHub Releases, verifies the SHA-256, swaps the binary.
 - `package_app.py` — assembles the shareable zip from a PyInstaller build (Win + Mac).
 - `build_exe.bat` / `build_mac.command` — local one-click builds.
 - `START HERE (Windows).bat` / `START HERE (Mac).command` — launchers for source users.
@@ -66,6 +67,16 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 - **No browser/hosted version is feasible.** A hosted web app can't call Procare's API (CORS: the API only
   allows Procare's own origin). Only in-page code (extension/userscript/bookmarklet reusing the logged-in
   session) could work. The desktop app is the supported path.
+- **Self-updater (`updater.py`) is best-effort and never blocks the app.** `self_update` swallows all
+  errors, no-ops when not frozen (source runs) or on unsupported platforms, and only prompts when stdin
+  is a TTY. It downloads the release zip and **verifies it against the published `*.zip.sha256` before
+  swapping** — never install unverified code. GitHub/CDN are NOT Procare hosts, so the account token is
+  never involved (it makes its own plain requests). A programmatic download carries no macOS
+  `com.apple.quarantine` / Windows Mark-of-the-Web, so the swapped binary launches without re-triggering
+  Gatekeeper/SmartScreen — do NOT "fix" this by shelling out to curl/browser (that would re-add the mark).
+  Windows can't overwrite a running `.exe`, so the swap is done by a temp `.bat` that waits for exit,
+  replaces (old kept as `.bak`), and relaunches; macOS replaces in place via a same-dir atomic
+  `os.replace` then `os.execv`. Any failure falls back to opening `RELEASES_PAGE`.
 - **Activities and gallery are two independent, overlapping sources.** Some daycares post everything as
   activities, some skip activities and upload straight to the gallery, and some do both for the same
   photo/video. We always fetch both: `fetch_all_records` (activity feed, correctly tagged per child via
@@ -125,13 +136,21 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
 ## Build & release
 
 - CI builds on `macos-latest` (Apple Silicon) + `windows-latest` via PyInstaller `--onefile --console`
-  with `--hidden-import scrapbook --hidden-import piexif`.
-- **To ship a new version:** `git tag vX.Y && git push origin vX.Y`. CI runs tests, builds both apps, and
-  publishes them to a GitHub Release (public download links). Manual runs (Actions tab) produce artifacts
-  only. `gh` CLI lives at `C:\Program Files\GitHub CLI\gh.exe`; call it via bash if PowerShell misbehaves.
-- Apps are unsigned → one-time SmartScreen ("Run anyway") / Gatekeeper ("right-click → Open").
+  with `--hidden-import scrapbook --hidden-import updater --hidden-import piexif`.
+- **Versioning: `APP_VERSION` in `procare_download.py` is the source of truth** and the self-updater
+  compares against it. It MUST equal the release tag — `build.yml` fails the release build if
+  `APP_VERSION != ${GITHUB_REF_NAME#v}`. So the release flow is: **bump `APP_VERSION` to `X.Y` in code →
+  merge → `git tag vX.Y && git push origin vX.Y`**. CI runs tests, builds both apps, and publishes them
+  to a GitHub Release (with auto-generated "What's Changed" notes via `generate_release_notes`) + the
+  zips and `.sha256`. Manual runs (Actions tab) produce artifacts only and skip the drift guard.
+  `gh` CLI lives at `C:\Program Files\GitHub CLI\gh.exe`; call it via bash if PowerShell misbehaves.
+- Apps are unsigned → one-time SmartScreen ("Run anyway") / Gatekeeper ("right-click → Open") on a
+  *browser* download; a download the app performs for its own self-update avoids that prompt (see the
+  `updater.py` gotcha above).
 
 ## Testing
 
 `python tests/test_core.py` (also run in CI). Add a test when you touch media identity, poster/avatar
-suppression, full-res selection, date parsing, scope/class logic, or the scrapbook folder layout.
+suppression, full-res selection, date parsing, scope/class logic, the scrapbook folder layout, or the
+updater's version/asset/verify logic. (The actual binary swap is platform+process bound and isn't
+unit-tested — keep it behind the fail-safe fallback.)

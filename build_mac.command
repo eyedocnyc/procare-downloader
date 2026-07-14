@@ -17,7 +17,7 @@ $PYTHON -m pip install --quiet --disable-pip-version-check pyinstaller requests 
 
 echo "Building ProcareDownloader (this takes a minute)..."
 $PYTHON -m PyInstaller --onefile --console --name ProcareDownloader \
-  --hidden-import scrapbook --hidden-import piexif --noconfirm procare_download.py
+  --hidden-import scrapbook --hidden-import updater --hidden-import piexif --noconfirm procare_download.py
 
 echo "Assembling shareable package..."
 $PYTHON package_app.py
