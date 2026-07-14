@@ -455,6 +455,94 @@ def test_self_update_silent_when_offline():
         up.fetch_latest = orig
 
 
+def test_swap_file_replaces_and_backs_up():
+    d = tempfile.mkdtemp(prefix="up_swap_")
+    target = os.path.join(d, "app")
+    new = os.path.join(d, "downloaded", "app.new")
+    os.makedirs(os.path.dirname(new))
+    open(target, "wb").write(b"OLD-BINARY")
+    os.chmod(target, 0o644)                   # start non-executable to prove chmod happens
+    open(new, "wb").write(b"NEW-BINARY")
+    backup = up._swap_file(new, target)
+    assert open(target, "rb").read() == b"NEW-BINARY"          # swapped in
+    assert backup and open(backup, "rb").read() == b"OLD-BINARY"  # old kept as .bak
+    assert os.stat(target).st_mode & 0o111                     # executable bit set
+    assert not os.path.exists(target + ".new")                 # staging cleaned up by replace
+
+
+def test_windows_script_is_bounded_and_carries_args():
+    s = up._windows_script(r"C:\app\ProcareDownloader.exe", r"C:\tmp\app.new",
+                           r"C:\app\ProcareDownloader.exe.bak", '"--scrapbook"')
+    # bounded: has a try counter + limit, and no unconditional 'goto retry'
+    assert "set /a tries" in s and "GEQ 30" in s
+    assert "goto retry" in s and "if %tries% GEQ 30 goto done" in s   # exit path exists
+    # carries the paths and the preserved relaunch args
+    assert r"C:\app\ProcareDownloader.exe" in s and r"C:\tmp\app.new" in s
+    assert '"--scrapbook"' in s
+    assert "del /f /q" in s                                    # self-deletes
+
+
+# --- hardened _download (https-per-redirect + size cap), no real network -------- #
+class _FakeResp:
+    def __init__(self, status=200, headers=None, chunks=(b"data",)):
+        self.status_code, self.headers, self._chunks = status, headers or {}, chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_content(self, chunk_size=0):
+        for c in self._chunks:
+            yield c
+
+
+class _FakeSession:
+    """Returns queued responses in order (one per .get call)."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.urls = []
+
+    def get(self, url, **kwargs):
+        self.urls.append(url)
+        return self._responses.pop(0)
+
+
+def test_download_accepts_plain_https_200():
+    d = tempfile.mkdtemp(prefix="up_dl_")
+    dest = os.path.join(d, "z.zip")
+    s = _FakeSession([_FakeResp(200, {"Content-Length": "4"}, (b"data",))])
+    assert up._download(s, "https://cdn/z.zip", dest) is True
+    assert open(dest, "rb").read() == b"data"
+
+
+def test_download_rejects_http_redirect_hop():
+    d = tempfile.mkdtemp(prefix="up_dl_")
+    dest = os.path.join(d, "z.zip")
+    # https -> 302 to http:// must be refused (no downgrade), and never written.
+    s = _FakeSession([_FakeResp(302, {"Location": "http://evil/z.zip"})])
+    assert up._download(s, "https://cdn/z.zip", dest) is False
+    assert not os.path.exists(dest)
+
+
+def test_download_rejects_oversized_content_length():
+    d = tempfile.mkdtemp(prefix="up_dl_")
+    dest = os.path.join(d, "z.zip")
+    huge = str(up.MAX_DOWNLOAD_BYTES + 1)
+    s = _FakeSession([_FakeResp(200, {"Content-Length": huge}, (b"x",))])
+    assert up._download(s, "https://cdn/z.zip", dest, max_bytes=up.MAX_DOWNLOAD_BYTES) is False
+
+
+def test_download_caps_streamed_bytes_without_content_length():
+    d = tempfile.mkdtemp(prefix="up_dl_")
+    dest = os.path.join(d, "z.zip")
+    # No Content-Length; body streams past the cap -> abort + delete partial.
+    s = _FakeSession([_FakeResp(200, {}, (b"a" * 6, b"b" * 6))])
+    assert up._download(s, "https://cdn/z.zip", dest, max_bytes=10) is False
+    assert not os.path.exists(dest)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

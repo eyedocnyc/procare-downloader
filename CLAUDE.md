@@ -74,9 +74,16 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
   never involved (it makes its own plain requests). A programmatic download carries no macOS
   `com.apple.quarantine` / Windows Mark-of-the-Web, so the swapped binary launches without re-triggering
   Gatekeeper/SmartScreen — do NOT "fix" this by shelling out to curl/browser (that would re-add the mark).
-  Windows can't overwrite a running `.exe`, so the swap is done by a temp `.bat` that waits for exit,
-  replaces (old kept as `.bak`), and relaunches; macOS replaces in place via a same-dir atomic
-  `os.replace` then `os.execv`. Any failure falls back to opening `RELEASES_PAGE`.
+  Windows can't overwrite a running `.exe`, so the swap is done by a temp `.bat` (uniquely named via
+  `mkstemp`, with a **bounded** wait-retry — never an infinite loop) that waits for exit, replaces
+  (old kept as `.bak`), and relaunches; macOS uses `_swap_file` (backup → same-dir atomic `os.replace`
+  → `chmod`) then `os.execv`. The relaunch preserves `sys.argv`. `_download` follows redirects
+  manually, **rejecting any non-`https` hop** and capping the body size (`MAX_DOWNLOAD_BYTES`, checked
+  via `Content-Length` and again while streaming). Any failure falls back to opening `RELEASES_PAGE`.
+  The checksum proves **integrity only** (it's fetched from the same release as the zip) — cryptographic
+  authenticity via **signed update manifests is the documented next step** if the threat model warrants
+  it. `_swap_file` / `_windows_script` are pure so they're unit-tested; the `os.execv`/detached-`.bat`
+  relaunch is process-bound and stays behind the fail-safe fallback.
 - **Activities and gallery are two independent, overlapping sources.** Some daycares post everything as
   activities, some skip activities and upload straight to the gallery, and some do both for the same
   photo/video. We always fetch both: `fetch_all_records` (activity feed, correctly tagged per child via
