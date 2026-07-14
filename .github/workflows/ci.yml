@@ -12,12 +12,17 @@ permissions:
 
 jobs:
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.12']
+        # Linux on both supported Pythons, plus Windows (where the release build
+        # also runs the tests) so platform-specific failures surface at PR time.
+        include:
+          - {os: ubuntu-latest, python-version: '3.9'}
+          - {os: ubuntu-latest, python-version: '3.12'}
+          - {os: windows-latest, python-version: '3.12'}
     steps:
       - uses: actions/checkout@v5
 
