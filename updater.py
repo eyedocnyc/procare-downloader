@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from urllib.parse import urljoin
 
 try:
     import requests
@@ -43,6 +44,8 @@ USER_AGENT = "procare-media-downloader/updater"
 
 CHECK_TIMEOUT = 6            # seconds for the version check (keep startup snappy)
 DOWNLOAD_TIMEOUT = 120       # seconds per download request
+MAX_REDIRECTS = 5            # bound the redirect chain we'll follow for a download
+MAX_DOWNLOAD_BYTES = 250 * 1024 * 1024  # refuse absurdly large bodies (app zip is ~tens of MB)
 
 
 # --------------------------------------------------------------------------- #
@@ -149,15 +152,43 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def _download(session, url, dest, timeout=DOWNLOAD_TIMEOUT):
-    with session.get(url, stream=True, timeout=timeout, allow_redirects=True) as resp:
-        if resp.status_code != 200:
+def _download(session, url, dest, timeout=DOWNLOAD_TIMEOUT,
+              max_redirects=MAX_REDIRECTS, max_bytes=MAX_DOWNLOAD_BYTES):
+    """Stream `url` to `dest`. Follows redirects manually so we can enforce that
+    EVERY hop stays https (a redirect must never downgrade the transport), bounds
+    the redirect chain, and caps the total size (via Content-Length and again
+    while streaming, so a lying/absent header can't blow past the limit)."""
+    for _ in range(max_redirects + 1):
+        if not url.lower().startswith("https://"):
             return False
-        with open(dest, "wb") as fh:
-            for chunk in resp.iter_content(chunk_size=1 << 16):
-                if chunk:
+        with session.get(url, stream=True, timeout=timeout, allow_redirects=False) as resp:
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location")
+                if not loc:
+                    return False
+                url = urljoin(url, loc)   # resolve relative redirects, then re-check https
+                continue
+            if resp.status_code != 200:
+                return False
+            cl = resp.headers.get("Content-Length")
+            if cl and cl.isdigit() and int(cl) > max_bytes:
+                return False
+            written = 0
+            with open(dest, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 16):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > max_bytes:
+                        fh.close()
+                        try:
+                            os.remove(dest)
+                        except OSError:
+                            pass
+                        return False
                     fh.write(chunk)
-    return True
+            return True
+    return False  # too many redirects
 
 
 def download_and_verify(zip_url, sha_url, tmp_dir, session=None):
@@ -220,21 +251,29 @@ def apply_update(new_bin, current_exe):
         return False
 
 
-def _apply_posix(new_bin, current_exe):
-    """macOS: the running binary's file can be replaced in place. Back up the old
-    one, move the new one over it, make it executable, and re-exec."""
-    backup = current_exe + ".bak"
+def _swap_file(new_bin, target):
+    """Replace the file at `target` with `new_bin` (pure file ops, no relaunch).
+
+    Backs `target` up to `<target>.bak`, stages the new binary in the SAME
+    directory (so the final swap is an atomic same-filesystem `os.replace` —
+    `new_bin` lives in a temp dir that may be on a different filesystem), and
+    marks it executable. Returns the backup path (or None if the backup step
+    failed). Split out from the relaunch so it can be unit-tested."""
+    backup = target + ".bak"
     try:
-        shutil.copy2(current_exe, backup)
+        shutil.copy2(target, backup)
     except Exception:
         backup = None
-    # Stage the new binary in the SAME directory as the target so the final
-    # swap is an atomic same-filesystem os.replace (new_bin lives in a temp dir,
-    # which may be on a different filesystem — os.replace across fs would fail).
-    staging = current_exe + ".new"
+    staging = target + ".new"
     shutil.copy2(new_bin, staging)
-    os.replace(staging, current_exe)
-    os.chmod(current_exe, 0o755)
+    os.replace(staging, target)
+    os.chmod(target, 0o755)
+    return backup
+
+
+def _apply_posix(new_bin, current_exe):
+    """macOS: swap the running binary's file in place, then re-exec."""
+    backup = _swap_file(new_bin, current_exe)
     print("\nUpdate installed. Restarting...\n")
     sys.stdout.flush()
     try:
@@ -251,33 +290,31 @@ def _apply_posix(new_bin, current_exe):
     return True
 
 
-def _apply_windows(new_bin, current_exe):
-    """Windows can't overwrite a running .exe, so hand off to a tiny batch script
-    that waits for us to exit, swaps the file (old kept as .bak), relaunches the
-    new exe, then deletes itself."""
-    bat = os.path.join(tempfile.gettempdir(), "procare_update.bat")
-    backup = current_exe + ".bak"
-    # Preserve the original CLI args on relaunch (double-click has none). Strip any
-    # embedded quotes so a stray value can't break out of the batch quoting; args
-    # here are plain flags/values (the password is never on argv).
-    arg_str = " ".join('"%s"' % a.replace('"', "") for a in sys.argv[1:])
-    script = f"""@echo off
+def _windows_script(target, new_bin, backup, arg_str):
+    """Build the batch that swaps a running .exe after the parent exits. The retry
+    loop is BOUNDED (waits ~30 tries for the file to free, then gives up leaving
+    the original in place) so it can never spin forever, and it relaunches with
+    the preserved args. Pure string builder so it can be unit-tested."""
+    return f"""@echo off
 setlocal
-set "TARGET={current_exe}"
+set "TARGET={target}"
 set "NEWBIN={new_bin}"
 set "BACKUP={backup}"
+set /a tries=0
 rem give the parent process a moment to fully exit
 ping 127.0.0.1 -n 3 >nul
 :retry
+set /a tries+=1
 if exist "%BACKUP%" del /f /q "%BACKUP%" >nul 2>&1
 move /y "%TARGET%" "%BACKUP%" >nul 2>&1
-if errorlevel 1 (
-  ping 127.0.0.1 -n 2 >nul
-  goto retry
-)
+if not errorlevel 1 goto swap
+if %tries% GEQ 30 goto done
+ping 127.0.0.1 -n 2 >nul
+goto retry
+:swap
 move /y "%NEWBIN%" "%TARGET%" >nul 2>&1
 if errorlevel 1 (
-  rem restore backup if the swap failed
+  rem swap failed after we moved the old exe aside -> restore it
   move /y "%BACKUP%" "%TARGET%" >nul 2>&1
   goto done
 )
@@ -285,8 +322,20 @@ start "" "%TARGET%" {arg_str}
 :done
 del /f /q "%~f0" >nul 2>&1
 """
-    with open(bat, "w", encoding="utf-8") as fh:
-        fh.write(script)
+
+
+def _apply_windows(new_bin, current_exe):
+    """Windows can't overwrite a running .exe, so hand off to a batch script that
+    waits for us to exit, swaps the file (old kept as .bak), relaunches, then
+    deletes itself. The script goes to a uniquely-named temp file."""
+    backup = current_exe + ".bak"
+    # Preserve the original CLI args on relaunch (double-click has none). Strip any
+    # embedded quotes so a stray value can't break out of the batch quoting; args
+    # here are plain flags/values (the password is never on argv).
+    arg_str = " ".join('"%s"' % a.replace('"', "") for a in sys.argv[1:])
+    fd, bat = tempfile.mkstemp(prefix="procare_update_", suffix=".bat")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(_windows_script(current_exe, new_bin, backup, arg_str))
     DETACHED = 0x00000008  # DETACHED_PROCESS
     subprocess.Popen(["cmd", "/c", bat], creationflags=DETACHED, close_fds=True)
     print("\nUpdate downloaded. The app will restart on the new version...\n")
