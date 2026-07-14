@@ -46,6 +46,13 @@ try:
 except ImportError:
     HAVE_PIEXIF = False  # photos still download; EXIF write is skipped with a warning
 
+# The self-updater compares this against the latest GitHub release. It MUST equal
+# the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
+# bump it in the same change you intend to tag.
+APP_VERSION = "1.9"
+
+import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
+
 
 # Procare changed domains over time; try the current one first, then the legacy one.
 BASE_URLS = [
@@ -1102,6 +1109,10 @@ def build_parser():
     ap.add_argument("--class-name", dest="class_name",
                     help="Class/room name to show on the scrapbook "
                          "(auto-detected from the feed if omitted)")
+    ap.add_argument("--version", action="version", version=f"Procare Downloader v{APP_VERSION}",
+                    help="Print the version and exit")
+    ap.add_argument("--no-update-check", action="store_true",
+                    help="Don't check GitHub for a newer version on startup")
     return ap
 
 
@@ -1111,6 +1122,7 @@ def guided(args):
     args._interactive = True
     print("=" * 52)
     print("  Procare Photo, Video & Scrapbook Downloader")
+    print(f"  version {APP_VERSION}")
     print("=" * 52)
     print()
     print("What would you like to do?")
@@ -1173,6 +1185,13 @@ def choose_scope(records):
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    # Offer to self-update to the latest release before doing anything else.
+    # This never raises and no-ops from source / when offline / when up to date.
+    if not args.no_update_check:
+        try:
+            updater.self_update(APP_VERSION)
+        except Exception:
+            pass
     # No command-line arguments (e.g. double-clicked .exe) -> friendly menu.
     if len(sys.argv) == 1:
         args = guided(args)
