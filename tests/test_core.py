@@ -466,7 +466,8 @@ def test_swap_file_replaces_and_backs_up():
     backup = up._swap_file(new, target)
     assert open(target, "rb").read() == b"NEW-BINARY"          # swapped in
     assert backup and open(backup, "rb").read() == b"OLD-BINARY"  # old kept as .bak
-    assert os.stat(target).st_mode & 0o111                     # executable bit set
+    if os.name == "posix":                                     # Windows has no exec bit
+        assert os.stat(target).st_mode & 0o111                 # executable bit set
     assert not os.path.exists(target + ".new")                 # staging cleaned up by replace
 
 
