@@ -28,9 +28,25 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 
 ## Procare API (reverse-engineered; no official public API)
 
-- Base: `https://api-school.procareconnect.com/api/web/` (legacy fallback `api-school.kinderlime.com`).
-- Auth: `POST auth/` with `{email, password}` → `user.auth_token`; send as `Authorization: Bearer <token>`.
-  Email+password only — **2FA / SSO-only accounts won't work**.
+- Base: `https://api-school.procareconnect.com/api/web/` (legacy fallback `api-school.kinderlime.com`,
+  now a **dead domain** — DNS no longer resolves; it survives only as a last-ditch fallback).
+- Auth (`authenticate`): two paths, tried in order.
+  1. **Primary — the flow the web app itself uses:** `POST https://online-auth.procareconnect.com/sessions/`
+     with `{email, password, role: "carer", platform: "web", preserve_sites: true}` → response carries
+     `auth_token` and `sites: [{base_url, is_default, ...}]`. We take the default site's `base_url`,
+     append `/api/web/`, and that's the account's home API host (`session_token_and_base`). Verified
+     against a real parent account: `base_url` is the plain `api-school.procareconnect.com`.
+  2. **Fallback — legacy `POST /api/web/auth/`** with `{email, password}` → `user.auth_token`. This
+     endpoint now **returns HTTP 500 for ordinary parent ("carer") accounts**, which is why the primary
+     path exists; keep the fallback for older backends.
+- Token is sent as `Authorization: Bearer <token>`. **Rejected credentials come back as HTTP 422**
+  (`{"errors":[...]}`), NOT 401/403 — `AUTH_REJECTED_CODES` covers all three, and a rejection **exits
+  immediately** (`_fail_login`): parent accounts lock after repeated failed logins and only the daycare
+  can unlock them, so never loop on a bad password.
+- Multi-tenant schools can live on `api-school.<school>.procareconnect.com`; `allow_auth_host` adds the
+  resolved host to `PROCARE_AUTH_HOSTS` (suffix-checked) so `download_file` may authenticate to it.
+  Email+password only — **2FA / SSO / MFA accounts won't work** (`_online_auth` detects a session that
+  isn't cleared for `regular_requests` and says so).
 - Kids: `GET parent/kids/` → each has `id` (UUID), `name` (usually "Lastname, Firstname"), sometimes `first_name`.
 - Feed: `GET parent/daily_activities/?kid_id=<id>&filters[daily_activity][date_from]=YYYY-MM-DD&filters[daily_activity][date_to]=...&page=N`.
   The feed **caps the window per query**, so we walk **month-by-month** (`month_windows`).
