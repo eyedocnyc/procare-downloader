@@ -60,6 +60,12 @@ BASE_URLS = [
     "https://api-school.kinderlime.com/api/web/",
 ]
 
+# The web app authenticates through this service, not the per-host endpoints
+# below. It resolves the account's home API host (returned under "sites") and
+# issues the bearer token. We try it first because the legacy POST
+# /api/web/auth/ now returns HTTP 500 for ordinary parent ("carer") accounts.
+ONLINE_AUTH_URL = "https://online-auth.procareconnect.com/sessions/"
+
 # Only these hosts ever receive the account's bearer token. Media downloads go to
 # CDN/S3 hosts on signed URLs that authorize themselves, so they must NOT carry the
 # Authorization header (that would leak the token to CloudFront/S3). We authenticate
@@ -127,6 +133,10 @@ ACTIVITY_EARLIEST_DEFAULT = date(2018, 1, 1)
 URL_KEYS = ["main_url", "video_file_url", "url", "photo_url", "image_url", "file_url"]
 DATE_KEYS = ["created_at", "activity_time", "captured_at", "taken_at", "updated_at"]
 
+# Status codes that mean "these credentials are wrong", not "this host is wrong".
+# Procare uses 422 (with an errors body); 401/403 are here for future-proofing.
+AUTH_REJECTED_CODES = (401, 403, 422)
+
 REQUEST_TIMEOUT = 60
 RETRIES = 4
 POLITE_DELAY = 0.25  # seconds between requests, to be gentle on the API
@@ -135,9 +145,126 @@ POLITE_DELAY = 0.25  # seconds between requests, to be gentle on the API
 # --------------------------------------------------------------------------- #
 # Auth
 # --------------------------------------------------------------------------- #
-def authenticate(session, email, password):
-    """Try each base URL; on success set the auth header and return (base, user_dict)."""
-    last_error = None
+def auth_error_message(resp):
+    """The server's own explanation of a rejected login, or None if it didn't give one.
+
+    Procare answers a bad email/password with HTTP 422 and a body like
+    {"errors": ["Email and password did not match."]} -- NOT 401/403. Treating
+    that as a transport error sends us on to the next base URL and buries the
+    real reason under whatever that host happens to say.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    if isinstance(payload, dict):
+        errs = payload.get("errors") or payload.get("error")
+        if isinstance(errs, str):
+            return errs
+        if isinstance(errs, (list, tuple)) and errs:
+            return "; ".join(str(e) for e in errs if e)
+    return None
+
+
+def _fail_login(detail):
+    """Exit with a clear, non-retryable credential-failure message.
+
+    Not retryable on purpose: parent accounts lock after repeated failed logins
+    and only the daycare can unlock them, so we must not loop on a bad password.
+    """
+    sys.exit(f"Login failed: {detail}\n"
+             "Check the email and password you use on schools.procareconnect.com.\n"
+             "Careful: repeated failed logins lock the account, and only your "
+             "daycare can unlock it.")
+
+
+def session_token_and_base(payload):
+    """Pull (auth_token, api_base) out of an online-auth /sessions/ response.
+
+    `api_base` is the account's home host (from the "sites" list) with the
+    "/api/web/" suffix the rest of this tool expects. Returns (None, None) if the
+    response carries no usable token or site (e.g. an MFA-gated login)."""
+    if not isinstance(payload, dict):
+        return None, None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    token = data.get("auth_token")
+    if not (isinstance(token, str) and token):
+        user = data.get("user")
+        token = user.get("auth_token") if isinstance(user, dict) else None
+    base = None
+    sites = data.get("sites")
+    if isinstance(sites, list) and sites:
+        # Prefer the account's default site; fall back to the first listed.
+        site = next((s for s in sites if isinstance(s, dict) and s.get("is_default")), sites[0])
+        base_url = (site.get("base_url") or "").rstrip("/") if isinstance(site, dict) else ""
+        if base_url:
+            base = base_url + "/api/web/"
+    if not (isinstance(token, str) and token) or not base:
+        return None, None
+    return token, base
+
+
+def allow_auth_host(api_base):
+    """Permit the bearer token to reach a resolved Procare API host.
+
+    Multi-tenant schools live on `api-school.<school>.procareconnect.com`; add the
+    resolved host to the allowlist so `download_file` will authenticate to it.
+    Only genuine Procare/Kinderlime hosts qualify — a look-alike such as
+    `api-school.procareconnect.com.evil.test` fails the suffix check."""
+    host = (urlsplit(api_base).hostname or "").lower()
+    if host.endswith(".procareconnect.com") or host.endswith(".kinderlime.com"):
+        PROCARE_AUTH_HOSTS.add(host)
+
+
+def _online_auth(session, email, password, errors):
+    """Authenticate via online-auth — the flow the web app itself uses.
+
+    Returns the resolved API base ("…/api/web/") on success, or None so the
+    caller can fall back to the legacy hosts. Exits on a definitive rejection
+    (bad password, or an MFA/SSO account this tool can't handle)."""
+    try:
+        resp = session.post(
+            ONLINE_AUTH_URL,
+            json={"email": email, "password": password,
+                  "role": "carer", "platform": "web", "preserve_sites": True},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        errors.append(f"{ONLINE_AUTH_URL}\n      could not reach this host ({type(e).__name__})")
+        return None
+    if resp.status_code in AUTH_REJECTED_CODES:
+        _fail_login(auth_error_message(resp) or "email or password is incorrect")
+    if resp.status_code >= 400:
+        errors.append(f"{ONLINE_AUTH_URL}\n      returned HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        errors.append(f"{ONLINE_AUTH_URL}\n      unexpected login response: {resp.text[:200]}")
+        return None
+
+    token, base = session_token_and_base(payload)
+    if not (token and base):
+        # A session with no usable token/host is almost always an MFA/SSO account:
+        # authentication half-succeeded but isn't cleared for regular requests.
+        access = payload.get("access_to") if isinstance(payload, dict) else None
+        if access and access != "regular_requests":
+            _fail_login("this account needs two-factor authentication or single "
+                        "sign-on, which this tool can't do. Only plain email + "
+                        "password accounts work.")
+        errors.append(f"{ONLINE_AUTH_URL}\n      login response carried no usable token/host")
+        return None
+
+    allow_auth_host(base)
+    session.headers.update({"Authorization": f"Bearer {token}"})
+    return base
+
+
+def _legacy_auth(session, email, password, errors):
+    """The pre-online-auth flow: POST /api/web/auth/ to each known host.
+
+    Returns (base, user_dict) on success, or None. Kept as a fallback for
+    backends where online-auth is unavailable."""
     for base in BASE_URLS:
         try:
             resp = session.post(
@@ -146,29 +273,51 @@ def authenticate(session, email, password):
                 timeout=REQUEST_TIMEOUT,
             )
         except requests.RequestException as e:
-            last_error = f"Could not reach {base}: {e}"
+            errors.append(f"{base}\n      could not reach this host ({type(e).__name__})")
             continue
 
         if resp.status_code == 404:
-            last_error = f"{base} returned 404 (wrong domain), trying next."
+            errors.append(f"{base}\n      returned 404 (wrong domain)")
             continue
-        if resp.status_code in (401, 403):
-            sys.exit("Login failed: email or password is incorrect.")
+        # 401/403 is the textbook answer; 422 is what Procare actually sends.
+        if resp.status_code in AUTH_REJECTED_CODES:
+            _fail_login(auth_error_message(resp) or "email or password is incorrect")
         if resp.status_code >= 400:
-            last_error = f"{base} returned HTTP {resp.status_code}: {resp.text[:200]}"
+            errors.append(f"{base}\n      returned HTTP {resp.status_code}: {resp.text[:200]}")
             continue
 
         try:
             user = resp.json()["user"]
             token = user["auth_token"]
         except (ValueError, KeyError, TypeError):
-            last_error = f"Unexpected login response from {base}: {resp.text[:200]}"
+            errors.append(f"{base}\n      unexpected login response: {resp.text[:200]}")
             continue
 
         session.headers.update({"Authorization": f"Bearer {token}"})
         return base, user
+    return None
 
-    sys.exit(f"Authentication failed. Last error:\n  {last_error}")
+
+def authenticate(session, email, password):
+    """Log in and return (api_base, payload).
+
+    Uses the web app's own flow first (online-auth resolves the account's API
+    host and issues the token), then falls back to the legacy per-host
+    /api/web/auth/ endpoint. Exits with a clear message if every path fails."""
+    errors = []
+    base = _online_auth(session, email, password, errors)
+    if base:
+        return base, None
+
+    result = _legacy_auth(session, email, password, errors)
+    if result:
+        return result
+
+    # Report every endpoint we tried, not just the last -- the legacy kinderlime
+    # host no longer resolves, so its DNS error would otherwise mask the real
+    # failure (e.g. the primary host's 500).
+    detail = "\n".join(f"  - {e}" for e in errors)
+    sys.exit(f"Authentication failed. Tried {len(errors)} endpoint(s):\n{detail}")
 
 
 # --------------------------------------------------------------------------- #

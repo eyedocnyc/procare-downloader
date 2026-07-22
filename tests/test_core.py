@@ -96,6 +96,126 @@ def test_media_helpers():
     assert pd.id_from_url("https://x/p/abc123.jpg?sig=1") == "abc123"
 
 
+class _AuthResp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+class _AuthSession:
+    """Replays a canned response per base URL, in order."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.headers = {}
+        self.calls = 0
+
+    def post(self, url, json=None, timeout=None):
+        self.calls += 1
+        r = self._responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def test_auth_error_message_extraction():
+    # Procare's real shape: {"errors": [...]}.
+    assert pd.auth_error_message(
+        _AuthResp(422, {"errors": ["Email and password did not match."]})
+    ) == "Email and password did not match."
+    # Singular string form, and a non-JSON body.
+    assert pd.auth_error_message(_AuthResp(422, {"error": "nope"})) == "nope"
+    assert pd.auth_error_message(_AuthResp(500, None, "<html>")) is None
+
+
+def test_auth_422_is_a_credential_failure_not_a_host_failure():
+    """A 422 must stop immediately, not fall through to another endpoint.
+
+    Regression: Procare answers bad credentials with 422, so the old code
+    treated it as "wrong host", tried the dead legacy host, and reported that
+    host's DNS error -- hiding the real reason from the user.
+    """
+    # First call is online-auth; a 422 there is a definitive rejection.
+    s = _AuthSession([_AuthResp(422, {"errors": ["Email and password did not match."]})])
+    try:
+        pd.authenticate(s, "a@b.c", "wrong")
+    except SystemExit as e:
+        assert "did not match" in str(e)
+    else:
+        raise AssertionError("expected SystemExit on a 422")
+    # Stopped after the first endpoint; never touched the legacy fallback.
+    assert s.calls == 1
+
+
+def test_auth_reports_every_endpoint_it_tried():
+    """All endpoints unreachable -> the message names them, not just the last."""
+    import requests as _rq
+    # online-auth + each legacy host all fail to connect.
+    s = _AuthSession([_rq.RequestException("boom-online")]
+                     + [_rq.RequestException("boom") for _ in pd.BASE_URLS])
+    try:
+        pd.authenticate(s, "a@b.c", "pw")
+    except SystemExit as e:
+        msg = str(e)
+        assert pd.ONLINE_AUTH_URL in msg
+        for base in pd.BASE_URLS:
+            assert base in msg, f"{base} missing from the error message"
+    else:
+        raise AssertionError("expected SystemExit when nothing works")
+
+
+def test_session_token_and_base_prefers_default_site():
+    payload = {"auth_token": "tok",
+               "sites": [{"base_url": "https://api-school.other.procareconnect.com", "is_default": False},
+                         {"base_url": "https://api-school.procareconnect.com", "is_default": True}]}
+    token, base = pd.session_token_and_base(payload)
+    assert token == "tok"
+    # The default site wins, and the /api/web/ suffix the tool expects is added.
+    assert base == "https://api-school.procareconnect.com/api/web/"
+    # No token or no sites -> nothing usable.
+    assert pd.session_token_and_base({"sites": []}) == (None, None)
+    assert pd.session_token_and_base({"auth_token": "t"}) == (None, None)
+
+
+def test_auth_online_success_sets_bearer_and_resolves_host():
+    """The happy path: online-auth returns a token + the account's home host."""
+    s = _AuthSession([_AuthResp(200, {
+        "auth_token": "TKN", "role": "carer", "access_to": "regular_requests",
+        "sites": [{"base_url": "https://api-school.procareconnect.com", "is_default": True}]})])
+    base, _payload = pd.authenticate(s, "a@b.c", "pw")
+    assert base == "https://api-school.procareconnect.com/api/web/"
+    assert s.headers["Authorization"] == "Bearer TKN"
+    assert s.calls == 1                                   # legacy path not touched
+
+
+def test_auth_falls_back_to_legacy_when_online_500s():
+    """A server error on online-auth must fall through to /api/web/auth/."""
+    s = _AuthSession([
+        _AuthResp(500, None, "oops"),                    # online-auth is unhappy
+        _AuthResp(200, {"user": {"auth_token": "L"}}),   # first legacy host works
+    ])
+    base, user = pd.authenticate(s, "a@b.c", "pw")
+    assert base == pd.BASE_URLS[0] and user["auth_token"] == "L"
+    assert s.headers["Authorization"] == "Bearer L"
+    assert s.calls == 2
+
+
+def test_auth_mfa_account_is_rejected_clearly():
+    """An MFA/SSO session (token withheld) gets a specific, honest message."""
+    s = _AuthSession([_AuthResp(200, {"access_to": "mfa_required", "mfa_methods": ["sms"]})])
+    try:
+        pd.authenticate(s, "a@b.c", "pw")
+    except SystemExit as e:
+        assert "two-factor" in str(e) or "single sign-on" in str(e)
+    else:
+        raise AssertionError("expected SystemExit for an MFA account")
+
+
 def test_photo_full_res_and_thumb_suppressed():
     entries = pd.collect_media_entries(photo_activity("k1", "2025-06-01", "p1"))
     assert len(entries) == 1 and entries[0][3] == "photo"
