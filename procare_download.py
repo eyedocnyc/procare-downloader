@@ -49,7 +49,7 @@ except ImportError:
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
 # bump it in the same change you intend to tag.
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 
 import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
 
@@ -756,53 +756,97 @@ def gallery_item_kids(item):
     return []
 
 
-def fetch_gallery_media(session, base, kid_id, reauth=None):
-    """Fetch photos & videos posted straight into the gallery, bypassing the
-    daily-activities feed entirely. Some daycares (or some rooms) only use the
-    gallery and never create an activity record, so this is queried
-    unconditionally alongside the feed - not just as a fallback.
+# The gallery endpoints are date-capped server-side (Procare now hides media
+# older than ~1 year from the default view), so — like the activities feed — we
+# must pass an explicit date-range filter to reach older items and walk the
+# timeline month-by-month. The filter is keyed by the resource name and takes a
+# "YYYY-MM-DD HH:MM" datetime, verified against a live account's dashboard request:
+#   parent/photos/?filters[photo][datetime_from]=2024-08-07 00:00
+#                 &filters[photo][datetime_to]=2024-08-07 23:59
+# Videos use the analogous filters[video][...].
+GALLERY_ENDPOINTS = (("video", VIDEO_PATH, "video"), ("photo", GALLERY_PHOTO_PATH, "photo"))
 
-    Returns [(url, dt, ident, kind, assoc_kids), ...] where `assoc_kids` is the
-    list of child ids the item explicitly names (usually empty — the gallery is
-    account-wide and child-agnostic). The caller decides attribution and dedup
-    (see collect_gallery / distribute_gallery). An account whose backend doesn't
-    support one of these endpoints (some 400) just yields nothing for it.
-    """
-    entries = []
-    for kind, path in (("video", VIDEO_PATH), ("photo", GALLERY_PHOTO_PATH)):
-        page = 1
-        while True:
-            params = {"page": page}
-            if kid_id:
-                params["kid_id"] = kid_id
-            payload = fetch_json(session, base + path, params, path, reauth=reauth, quiet=True)
-            if payload is None:
-                break
-            items = extract_items(payload)
-            if not items:
-                break
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                # For videos, grab the real video URL (not the poster image).
-                url = find_video_url(item) if kind == "video" else find_media_url(item)
-                if not url:
-                    continue
-                # Video URLs are randomized 'open-uri' names that change on every
-                # request (see collect_media_entries) - identify by the item's own
-                # resource id instead, so it dedups correctly against the same
-                # video seen via the activity feed.
-                ident = item.get("id") if kind == "video" and item.get("id") is not None \
-                    else (id_from_url(url) or stable_media_ident(url))
-                entries.append((url, find_capture_dt(item), str(ident), kind,
-                                gallery_item_kids(item)))
-            page += 1
-            time.sleep(POLITE_DELAY)
+
+def gallery_query_params(resource, win_from, win_to, kid_id=None, page=1):
+    """Build the query for one gallery page/window. `resource` is the filter key
+    ("photo"/"video"); `win_from`/`win_to` are ISO dates (YYYY-MM-DD)."""
+    params = {
+        "page": page,
+        f"filters[{resource}][datetime_from]": f"{win_from} 00:00",
+        f"filters[{resource}][datetime_to]": f"{win_to} 23:59",
+    }
+    if kid_id:
+        params["kid_id"] = kid_id
+    return params
+
+
+def _gallery_items_to_entries(items, kind):
+    """Turn one page of gallery items into (url, dt, ident, kind, assoc_kids)."""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # For videos, grab the real video URL (not the poster image).
+        url = find_video_url(item) if kind == "video" else find_media_url(item)
+        if not url:
+            continue
+        # Video URLs are randomized 'open-uri' names that change on every request
+        # (see collect_media_entries) - identify by the item's own resource id
+        # instead, so it dedups against the same video seen via the activity feed.
+        ident = item.get("id") if kind == "video" and item.get("id") is not None \
+            else (id_from_url(url) or stable_media_ident(url))
+        out.append((url, find_capture_dt(item), str(ident), kind, gallery_item_kids(item)))
+    return out
+
+
+def _paginate_gallery(session, base, path, kind, base_params, reauth=None):
+    """Page through one gallery query (a fixed `base_params` plus an incrementing
+    `page`) and return its entries. Stops on the first empty page / error."""
+    entries, page = [], 1
+    while True:
+        params = dict(base_params, page=page)
+        payload = fetch_json(session, base + path, params, path, reauth=reauth, quiet=True)
+        if payload is None:
+            break
+        items = extract_items(payload)
+        if not items:
+            break
+        entries.extend(_gallery_items_to_entries(items, kind))
+        page += 1
+        time.sleep(POLITE_DELAY)
     return entries
 
 
-def collect_gallery(session, base, kid_ids, reauth=None):
-    """Query the gallery once per child id and collapse the results per media item.
+def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None):
+    """Fetch photos & videos posted straight into the gallery, bypassing the
+    daily-activities feed entirely. Some daycares (or some rooms) only use the
+    gallery and never create an activity record, and Procare now moves media
+    older than ~1 year out of the activity feed into the gallery.
+
+    Two passes per endpoint (results merged, deduped downstream by (kind, ident)):
+    an **unfiltered** pass — for backends that return the whole gallery without a
+    date filter — and a **date-windowed** pass walking `start_date`..`end_date`
+    month-by-month, which is what reaches media the date-capped backends hide
+    (issue #1). Doing both means neither kind of account regresses.
+
+    Returns [(url, dt, ident, kind, assoc_kids), ...]; `assoc_kids` is the list of
+    child ids the item explicitly names (usually empty — the gallery is
+    account-wide). The caller attributes + dedups (collect_gallery /
+    distribute_gallery). A 400 on an endpoint just yields nothing for it.
+    """
+    entries = []
+    kid_params = {"kid_id": kid_id} if kid_id else {}
+    for kind, path, resource in GALLERY_ENDPOINTS:
+        entries.extend(_paginate_gallery(session, base, path, kind, dict(kid_params), reauth))
+        for win_from, win_to in month_windows(start_date, end_date):
+            base_params = gallery_query_params(resource, win_from, win_to, kid_id)
+            entries.extend(_paginate_gallery(session, base, path, kind, base_params, reauth))
+    return entries
+
+
+def collect_gallery(session, base, kid_ids, start_date, end_date, reauth=None):
+    """Query the gallery once per child id (walking `start_date`..`end_date`
+    month-by-month) and collapse the results per media item.
 
     Returns {(kind, ident): {"url", "dt", "assoc": set(explicit kid ids),
     "returned_for": set(kid ids whose query returned this item)}}. `returned_for`
@@ -810,7 +854,8 @@ def collect_gallery(session, base, kid_ids, reauth=None):
     for only one kid) from an account-wide one (same item for every kid)."""
     meta = {}
     for kid_id in kid_ids:
-        for url, dt, ident, kind, assoc in fetch_gallery_media(session, base, kid_id, reauth=reauth):
+        for url, dt, ident, kind, assoc in fetch_gallery_media(
+                session, base, kid_id, start_date, end_date, reauth=reauth):
             m = meta.setdefault((kind, ident),
                                 {"url": url, "dt": dt, "assoc": set(), "returned_for": set()})
             m["assoc"].update(assoc)
@@ -1491,7 +1536,10 @@ def run(args):
     # (it ignores kid_id), so distribute_gallery attributes each item where it can,
     # dedups against what the activity feed already found, and routes anything it
     # can't attribute to a shared bucket instead of an arbitrary child.
-    gallery_meta = collect_gallery(session, base, [k.get("id") for k in kids_meta], reauth=reauth)
+    # Walk the same date range as the activity feed so gallery media older than
+    # Procare's ~1-year activity cap is reachable (the endpoints are date-filtered).
+    gallery_meta = collect_gallery(session, base, [k.get("id") for k in kids_meta],
+                                   walk_start, walk_end, reauth=reauth)
     shared_records = distribute_gallery(gallery_meta, sections, since_dt, until_dt)
     if shared_records:
         # Only appears with siblings (single-child galleries fold into that child).

@@ -54,6 +54,12 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
   `parent/videos/`) is how "gallery-only" daycares expose media that never went through an activity.
   We query both endpoints unconditionally per child (`fetch_gallery_media`); a 400 there is treated as
   "nothing here", not an error (`fetch_json(..., quiet=True)`).
+- **The gallery endpoints are date-capped, so they need an explicit date filter to reach old media.**
+  Procare now hides media older than ~1 year from the default view (issue #1). The dashboard reaches
+  the rest with `?filters[photo][datetime_from]=YYYY-MM-DD 00:00&filters[photo][datetime_to]=... 23:59`
+  (videos use `filters[video][...]`) — verified against a live account. So `fetch_gallery_media` walks
+  the timeline **month-by-month** with these filters (`gallery_query_params`, reusing `month_windows`),
+  exactly like the activity feed — a bare unfiltered query only returns the recent window.
 - Each activity: `activity_type`, `activity_time`/`activity_date`, `comment`, `data` (type-specific),
   `kid_ids` (which children it belongs to), `staff_present_name`, and `activiable` (the media/detail object).
 
