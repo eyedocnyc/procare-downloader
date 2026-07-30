@@ -293,6 +293,40 @@ def test_gallery_item_kids_extraction():
     assert pd.gallery_item_kids({"caption": "hi"}) == []       # the real, untagged case
 
 
+def test_gallery_query_params_date_filter():
+    # Matches the live dashboard request the endpoint requires to reach old media:
+    #   parent/photos/?filters[photo][datetime_from]=2024-08-01 00:00
+    #                 &filters[photo][datetime_to]=2024-08-31 23:59
+    p = pd.gallery_query_params("photo", "2024-08-01", "2024-08-31", kid_id="k1", page=2)
+    assert p["filters[photo][datetime_from]"] == "2024-08-01 00:00"
+    assert p["filters[photo][datetime_to]"] == "2024-08-31 23:59"
+    assert p["page"] == 2 and p["kid_id"] == "k1"
+    v = pd.gallery_query_params("video", "2024-08-01", "2024-08-31")
+    assert "filters[video][datetime_from]" in v and "kid_id" not in v  # no kid -> omitted
+
+
+def test_fetch_gallery_media_runs_unfiltered_and_windowed_passes():
+    # Both an unfiltered pass (backends that return the whole gallery) AND a
+    # date-windowed pass (reaches media the ~1yr-capped backends hide) must fire,
+    # for photos and videos, so neither kind of account regresses.
+    from datetime import date as _date
+    seen = []
+    orig = pd.fetch_json
+    pd.fetch_json = lambda *a, **k: seen.append(dict(a[2])) or None  # a[2] == params; end walk
+    try:
+        pd.fetch_gallery_media(None, "https://api-school.procareconnect.com/api/web/",
+                               "k1", _date(2024, 8, 1), _date(2024, 9, 30))
+    finally:
+        pd.fetch_json = orig
+    has_filter = lambda p, r: f"filters[{r}][datetime_from]" in p
+    # unfiltered pass: a query with the kid but NO datetime filter
+    assert any(p.get("kid_id") == "k1" and not has_filter(p, "photo") and not has_filter(p, "video")
+               for p in seen)
+    # date-windowed pass: datetime filters present for both resources
+    assert any(has_filter(p, "photo") for p in seen)
+    assert any(has_filter(p, "video") for p in seen)
+
+
 def test_gallery_single_child_folds_in():
     s = _section("k1")
     meta = dict([_gitem("video", "v1", datetime(2025, 6, 1, 10), returned_for={"k1"})])
