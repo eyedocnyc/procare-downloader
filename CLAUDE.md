@@ -60,6 +60,11 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
   (videos use `filters[video][...]`) — verified against a live account. So `fetch_gallery_media` walks
   the timeline **month-by-month** with these filters (`gallery_query_params`, reusing `month_windows`),
   exactly like the activity feed — a bare unfiltered query only returns the recent window.
+  The month-by-month walk over years of history is long and was silent, so it looked frozen: it now
+  prints a `\r` progress line (`_gallery_progress`, `gallery_step_count`) behind an upfront time
+  warning. `_paginate_gallery` is **bounded** (`GALLERY_MAX_PAGES` + a repeat-page check that stops if
+  an endpoint ignores `page`) so it can never loop forever, and gallery calls pass a small
+  `fetch_json(retries=GALLERY_RETRIES)` so a flaky month costs ~seconds, not the full 5xx backoff.
 - Each activity: `activity_type`, `activity_time`/`activity_date`, `comment`, `data` (type-specific),
   `kid_ids` (which children it belongs to), `staff_present_name`, and `activiable` (the media/detail object).
 
