@@ -305,6 +305,48 @@ def test_gallery_query_params_date_filter():
     assert "filters[video][datetime_from]" in v and "kid_id" not in v  # no kid -> omitted
 
 
+def test_paginate_gallery_stops_on_repeated_page():
+    # A backend that ignores `page` returns the SAME non-empty page forever.
+    # _paginate_gallery must detect the repeat and stop instead of looping.
+    calls = {"n": 0}
+    same_page = {"photos": [{"id": "p1", "main_url": "https://cdn/photos/files/p1/main/p1.jpg"}]}
+    orig_fj, orig_sleep = pd.fetch_json, pd.time.sleep
+    pd.fetch_json = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), same_page)[1]
+    pd.time.sleep = lambda *a, **k: None       # don't actually wait between pages
+    try:
+        out = pd._paginate_gallery(None, "https://api-school.procareconnect.com/api/web/",
+                                   pd.GALLERY_PHOTO_PATH, "photo", {"kid_id": "k1"})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
+    assert len(out) == 1                       # only the first page's item is kept
+    assert calls["n"] == 2                     # page 1, then page 2 detected as a repeat -> stop
+
+
+def test_paginate_gallery_respects_max_pages():
+    # Distinct non-empty page every time (page-aware but "infinite") -> the cap stops it.
+    orig_fj, orig_sleep = pd.fetch_json, pd.time.sleep
+    pd.fetch_json = lambda *a, **k: {"photos": [
+        {"id": f"p{a[2]['page']}", "main_url": f"https://cdn/photos/files/x{a[2]['page']}/main/x.jpg"}]}
+    pd.time.sleep = lambda *a, **k: None
+    try:
+        out = pd._paginate_gallery(None, "https://api-school.procareconnect.com/api/web/",
+                                   pd.GALLERY_PHOTO_PATH, "photo", {})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
+    assert len(out) == pd.GALLERY_MAX_PAGES     # bounded, never infinite
+
+
+def test_gallery_step_count_and_progress():
+    from datetime import date as _date
+    # 1 kid, 2 endpoints, Aug+Sep (2 months): 2 * (1 unfiltered + 2 windows) = 6.
+    assert pd.gallery_step_count(["k1"], _date(2024, 8, 1), _date(2024, 9, 30)) == 6
+    seen = []
+    cb = pd._gallery_progress(4)
+    for lbl in (None, "2024-08", "2024-09", "2024-10"):
+        cb(lbl)                                 # must not raise; drives the \r line
+    assert True                                 # smoke: 4 steps over total 4 = up to 100%
+
+
 def test_fetch_gallery_media_runs_unfiltered_and_windowed_passes():
     # Both an unfiltered pass (backends that return the whole gallery) AND a
     # date-windowed pass (reaches media the ~1yr-capped backends hide) must fire,

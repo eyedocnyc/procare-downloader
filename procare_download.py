@@ -49,7 +49,7 @@ except ImportError:
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
 # bump it in the same change you intend to tag.
-APP_VERSION = "1.11"
+APP_VERSION = "1.12"
 
 import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
 
@@ -425,13 +425,16 @@ def ext_from_url(url, default):
 # --------------------------------------------------------------------------- #
 # Download + timestamp
 # --------------------------------------------------------------------------- #
-def fetch_json(session, url, params, label="", reauth=None, quiet=False):
+def fetch_json(session, url, params, label="", reauth=None, quiet=False, retries=None):
     """`quiet` suppresses the HTTP-error print — use it for endpoints that are
     expected to 400/404 on some accounts (e.g. the bare gallery endpoints on
     backends that don't support them) so a normal run doesn't look like it hit
-    an error when there's simply nothing there."""
+    an error when there's simply nothing there. `retries` overrides the default
+    attempt count (the gallery walk uses a smaller one so a flaky month doesn't
+    cost the full ~15s of 5xx backoff)."""
+    attempts = retries or RETRIES
     reauthed = False
-    for attempt in range(RETRIES):
+    for attempt in range(attempts):
         try:
             resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
@@ -450,7 +453,7 @@ def fetch_json(session, url, params, label="", reauth=None, quiet=False):
                       f"(params={params}); stopping this feed.")
             return None
         except requests.RequestException as e:
-            if attempt == RETRIES - 1:
+            if attempt == attempts - 1:
                 if not quiet:
                     print(f"  ! Network error on {label or url}: {e}")
                 return None
@@ -765,6 +768,12 @@ def gallery_item_kids(item):
 #                 &filters[photo][datetime_to]=2024-08-07 23:59
 # Videos use the analogous filters[video][...].
 GALLERY_ENDPOINTS = (("video", VIDEO_PATH, "video"), ("photo", GALLERY_PHOTO_PATH, "photo"))
+# Safety bound for the gallery pagination: stop after this many pages of one
+# query (and also if a page repeats the previous page's items) so a backend that
+# ignores the `page` param can never spin the loop forever. Fewer retries too, so
+# a flaky month costs a couple of seconds, not the full 5xx backoff.
+GALLERY_MAX_PAGES = 500
+GALLERY_RETRIES = 2
 
 
 def gallery_query_params(resource, win_from, win_to, kid_id=None, page=1):
@@ -801,23 +810,30 @@ def _gallery_items_to_entries(items, kind):
 
 def _paginate_gallery(session, base, path, kind, base_params, reauth=None):
     """Page through one gallery query (a fixed `base_params` plus an incrementing
-    `page`) and return its entries. Stops on the first empty page / error."""
-    entries, page = [], 1
-    while True:
+    `page`) and return its entries. Stops on an empty page, an error, the
+    GALLERY_MAX_PAGES cap, or a page that repeats the previous one's items — the
+    last two guard against a backend that ignores `page` and would otherwise loop
+    forever."""
+    entries, prev_ids = [], None
+    for page in range(1, GALLERY_MAX_PAGES + 1):
         params = dict(base_params, page=page)
-        payload = fetch_json(session, base + path, params, path, reauth=reauth, quiet=True)
+        payload = fetch_json(session, base + path, params, path,
+                             reauth=reauth, quiet=True, retries=GALLERY_RETRIES)
         if payload is None:
             break
         items = extract_items(payload)
         if not items:
             break
+        page_ids = [it.get("id") for it in items if isinstance(it, dict)]
+        if page_ids and page_ids == prev_ids:   # endpoint ignoring `page` -> stop
+            break
+        prev_ids = page_ids
         entries.extend(_gallery_items_to_entries(items, kind))
-        page += 1
         time.sleep(POLITE_DELAY)
     return entries
 
 
-def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None):
+def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None, progress=None):
     """Fetch photos & videos posted straight into the gallery, bypassing the
     daily-activities feed entirely. Some daycares (or some rooms) only use the
     gallery and never create an activity record, and Procare now moves media
@@ -836,15 +852,41 @@ def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None
     """
     entries = []
     kid_params = {"kid_id": kid_id} if kid_id else {}
+    windows = list(month_windows(start_date, end_date))
     for kind, path, resource in GALLERY_ENDPOINTS:
+        if progress:
+            progress(None)                        # the unfiltered pass
         entries.extend(_paginate_gallery(session, base, path, kind, dict(kid_params), reauth))
-        for win_from, win_to in month_windows(start_date, end_date):
+        for win_from, win_to in windows:
+            if progress:
+                progress(win_from[:7])            # YYYY-MM label for this window
             base_params = gallery_query_params(resource, win_from, win_to, kid_id)
             entries.extend(_paginate_gallery(session, base, path, kind, base_params, reauth))
     return entries
 
 
-def collect_gallery(session, base, kid_ids, start_date, end_date, reauth=None):
+def gallery_step_count(kid_ids, start_date, end_date):
+    """Total progress steps the gallery walk will take: per child, per endpoint,
+    one unfiltered pass plus one per month window."""
+    months = len(list(month_windows(start_date, end_date)))
+    return max(len(kid_ids), 1) * len(GALLERY_ENDPOINTS) * (1 + months)
+
+
+def _gallery_progress(total):
+    """Return a callback for the gallery walk that prints one in-place updating
+    line ('Gallery   42%  (2019-03)'). Called once per step with a YYYY-MM label
+    (or None for the unfiltered pass)."""
+    state = {"done": 0}
+
+    def cb(label):
+        state["done"] += 1
+        pct = min(100, int(state["done"] * 100 / total)) if total else 100
+        sys.stdout.write(f"\r  Gallery {pct:3d}%  ({label or 'recent'})    ")
+        sys.stdout.flush()
+    return cb
+
+
+def collect_gallery(session, base, kid_ids, start_date, end_date, reauth=None, progress=None):
     """Query the gallery once per child id (walking `start_date`..`end_date`
     month-by-month) and collapse the results per media item.
 
@@ -855,7 +897,7 @@ def collect_gallery(session, base, kid_ids, start_date, end_date, reauth=None):
     meta = {}
     for kid_id in kid_ids:
         for url, dt, ident, kind, assoc in fetch_gallery_media(
-                session, base, kid_id, start_date, end_date, reauth=reauth):
+                session, base, kid_id, start_date, end_date, reauth=reauth, progress=progress):
             m = meta.setdefault((kind, ident),
                                 {"url": url, "dt": dt, "assoc": set(), "returned_for": set()})
             m["assoc"].update(assoc)
@@ -1538,8 +1580,15 @@ def run(args):
     # can't attribute to a shared bucket instead of an arbitrary child.
     # Walk the same date range as the activity feed so gallery media older than
     # Procare's ~1-year activity cap is reachable (the endpoints are date-filtered).
-    gallery_meta = collect_gallery(session, base, [k.get("id") for k in kids_meta],
-                                   walk_start, walk_end, reauth=reauth)
+    gallery_kids = [k.get("id") for k in kids_meta]
+    total_steps = gallery_step_count(gallery_kids, walk_start, walk_end)
+    print("\nChecking the photo/video gallery for older media. This walks your whole")
+    print("history month-by-month, so it can take several minutes to tens of minutes")
+    print("for years of history — it is NOT frozen. You can safely stop and re-run")
+    print("later (already-downloaded files are skipped), or use a date range to limit it.")
+    gallery_meta = collect_gallery(session, base, gallery_kids, walk_start, walk_end,
+                                   reauth=reauth, progress=_gallery_progress(total_steps))
+    print()   # finish the \r progress line
     shared_records = distribute_gallery(gallery_meta, sections, since_dt, until_dt)
     if shared_records:
         # Only appears with siblings (single-child galleries fold into that child).
