@@ -48,8 +48,12 @@ except ImportError:
 
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
-# bump it in the same change you intend to tag.
-APP_VERSION = "2.0"
+# bump it in the same change you intend to tag. This is the gui-experiment branch:
+# keep this on a "2.0-alphaN" track (never a bare "1.x" or "2.0") so it can never
+# numerically collide with a real release, and tag/release as a GitHub prerelease
+# (see build.yml) so updater.py's /releases/latest check never offers it to
+# stable users.
+APP_VERSION = "2.0-alpha1"
 
 import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
 

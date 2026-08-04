@@ -115,3 +115,12 @@ jobs:
           # leak its concatenated bodies + trailers into the notes).
           generate_release_notes: true
           files: dist/**/ProcareDownloader-*.zip*
+          # This branch is a GUI experiment, not the stable line: updater.py polls
+          # GitHub's /releases/latest endpoint, which by contract excludes
+          # prereleases, so marking it prerelease is what keeps every existing
+          # 1.x console user from being auto-upgraded into an unproven build (this
+          # is exactly the gap that let v2.0's GUI reach users before it was ready
+          # last time). Testers opt in manually from the Releases page. Do NOT
+          # flip this to false on this branch -- only the real graduation release,
+          # cut from main, should ever be non-prerelease.
+          prerelease: true
