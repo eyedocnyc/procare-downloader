@@ -45,7 +45,10 @@ echo (Your password is hidden as you type and is never saved.)
 echo.
 
 if "%choice%"=="2" (
-  %PYTHON% procare_download.py
+  REM --out with its own default value is a harmless explicit flag -- it just
+  REM keeps sys.argv non-empty so this doesn't trigger the guided menu/GUI a
+  REM second time (this script already asked the same question above).
+  %PYTHON% procare_download.py --out procare_media
 ) else if "%choice%"=="3" (
   %PYTHON% procare_download.py --scrapbook-only
 ) else (

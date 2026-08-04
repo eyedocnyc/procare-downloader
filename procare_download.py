@@ -1304,19 +1304,25 @@ def make_zip(out_dir):
     print(f"Created: {archive}  ({size_mb:,.0f} MB)")
 
 
+def open_path(path):
+    """Open a file with the OS default handler (best-effort; ignore if headless).
+    Shared by the auto-open in announce_scrapbook() and the GUI's "Open
+    Scrapbook" button, so there's one place that knows how to do this."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # noqa: S606
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["open", path], check=False)
+    except Exception:
+        pass
+
+
 def announce_scrapbook(out_dir, pages):
     landing = os.path.join(out_dir, "Open Scrapbook.html")
     print(f"\nScrapbook built: {pages} month page(s).")
     print(f"Open this file to view it:\n  {landing}")
-    # Try to open it automatically (best-effort; ignore if headless).
-    try:
-        if sys.platform.startswith("win"):
-            os.startfile(landing)  # noqa: S606
-        elif sys.platform == "darwin":
-            import subprocess
-            subprocess.run(["open", landing], check=False)
-    except Exception:
-        pass
+    open_path(landing)
 
 
 def build_parser():
@@ -1349,6 +1355,8 @@ def build_parser():
                     help="Print the version and exit")
     ap.add_argument("--no-update-check", action="store_true",
                     help="Don't check GitHub for a newer version on startup")
+    ap.add_argument("--no-gui", action="store_true",
+                    help="Use the classic text-based prompts instead of the graphical window")
     return ap
 
 
@@ -1388,6 +1396,29 @@ def _parse_ymd(value):
         return None
 
 
+def resolve_scope(items, choice, custom_start=None, custom_finish=None):
+    """Pure decision logic shared by the terminal prompt and the GUI: given
+    class_spans() items (sorted oldest-first, as choose_scope builds them), a
+    choice ("1".."N", matching choose_scope's menu numbering), and optional
+    custom-range strings, returns (since_dt, until_dt, class_name). No I/O."""
+    custom = len(items) + 2
+    choice = (choice or "1").strip()
+    if choice.isdigit():
+        n = int(choice)
+        if 2 <= n < custom and items:                      # a specific class
+            name, (d0, d1, _) = items[n - 2]
+            return (_parse_ymd(d0),
+                    _parse_ymd(d1).replace(hour=23, minute=59, second=59), name)
+        if n == custom:                                    # custom date range
+            since = _parse_ymd(custom_start)
+            until = _parse_ymd(custom_finish)
+            if until:
+                until = until.replace(hour=23, minute=59, second=59)
+            return since, until, None
+    # default: everything (use the single class name for the title if there is one)
+    return None, None, (items[0][0] if len(items) == 1 else None)
+
+
 def choose_scope(records):
     """Interactive menu: choose how much to download. Always prompts.
     Returns (since_dt, until_dt, class_name)."""
@@ -1401,35 +1432,83 @@ def choose_scope(records):
     choice = input("Pick a number then Enter (default 1): ").strip() or "1"
     print()
 
-    if choice.isdigit():
-        n = int(choice)
-        if 2 <= n < custom and items:                      # a specific class
-            name, (d0, d1, _) = items[n - 2]
-            return (_parse_ymd(d0),
-                    _parse_ymd(d1).replace(hour=23, minute=59, second=59), name)
-        if n == custom:                                    # custom date range
-            since = _parse_ymd(input("  Start date (YYYY-MM-DD, blank = earliest): "))
-            until = _parse_ymd(input("  Finish date (YYYY-MM-DD, blank = today): "))
-            if until:
-                until = until.replace(hour=23, minute=59, second=59)
-            print()
-            return since, until, None
-    # default: everything (use the single class name for the title if there is one)
-    return None, None, (items[0][0] if len(items) == 1 else None)
+    custom_start = custom_finish = None
+    if choice.isdigit() and int(choice) == custom:
+        custom_start = input("  Start date (YYYY-MM-DD, blank = earliest): ")
+        custom_finish = input("  Finish date (YYYY-MM-DD, blank = today): ")
+        print()
+    return resolve_scope(items, choice, custom_start, custom_finish)
+
+
+# Flags that don't themselves supply a scope/target -- passing only these still
+# counts as "no real arguments" for the guided-menu/GUI decision below.
+_GUIDED_COMPATIBLE_FLAGS = {"--no-gui", "--no-update-check"}
+
+
+def _gui_available():
+    """Best-effort probe: can we actually open a Tk window here? False in
+    headless/stripped environments (CI, some minimal Linux installs) so main()
+    falls back to the terminal flow instead of crashing."""
+    if os.environ.get("PROCARE_FORCE_NO_GUI"):
+        return False
+    try:
+        import tkinter
+        root = tkinter.Tk()
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
+def _gui_ask_yes_no(question):
+    """Update-available confirm for GUI launches, replacing updater.py's
+    TTY-gated input() prompt (which would never be seen under --windowed)."""
+    import tkinter
+    from tkinter import messagebox
+    root = tkinter.Tk()
+    root.withdraw()
+    try:
+        return messagebox.askyesno("Procare Downloader — Update available", question)
+    finally:
+        root.destroy()
+
+
+def _decide_launch_mode(argv, gui_available):
+    """Pure decision logic for main(): given sys.argv[1:] and whether a Tk
+    window can actually open, returns "gui", "guided" (text menu), or "cli"
+    (existing flag-driven/scripted behavior, untouched)."""
+    guided_compatible = set(argv) <= _GUIDED_COMPATIBLE_FLAGS
+    if not guided_compatible:
+        return "cli"
+    if "--no-gui" in argv or not gui_available:
+        return "guided"
+    return "gui"
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    # Only probe whether a Tk window can actually open when the launch mode
+    # could plausibly be "gui" -- a scripted/CLI-flag run always resolves to
+    # "cli" regardless, so it shouldn't pay for constructing (and instantly
+    # destroying) a throwaway Tk root just to find that out.
+    argv = sys.argv[1:]
+    could_be_gui = set(argv) <= _GUIDED_COMPATIBLE_FLAGS and "--no-gui" not in argv
+    mode = _decide_launch_mode(argv, _gui_available() if could_be_gui else False)
     # Offer to self-update to the latest release before doing anything else.
     # This never raises and no-ops from source / when offline / when up to date.
     if not args.no_update_check:
         try:
-            updater.self_update(APP_VERSION)
+            ask = _gui_ask_yes_no if mode == "gui" else None
+            updater.self_update(APP_VERSION, ask=ask)
         except Exception:
             pass
+    if mode == "gui":
+        import gui
+        gui.launch_gui(args, APP_VERSION)
+        return
     # No command-line arguments (e.g. double-clicked .exe) -> friendly menu.
-    guided_mode = len(sys.argv) == 1
+    guided_mode = mode == "guided"
     if guided_mode:
         args = guided(args)
     try:
@@ -1483,7 +1562,9 @@ def run(args):
     _warn_if_low_disk_space(out_dir)
 
     email = args.email or input("Procare email: ").strip()
-    password = getpass.getpass("Procare password (input hidden): ")
+    # GUI mode sets args.password directly (in-memory only -- never a CLI flag,
+    # so it never lands in shell history or a process listing).
+    password = getattr(args, "password", None) or getpass.getpass("Procare password (input hidden): ")
 
     def parse_date(value, flag):
         if not value:
@@ -1564,7 +1645,9 @@ def run(args):
         if want_picker:
             if multi:
                 print(f"\n--- {who} ---")
-            c_since, c_until, picked = choose_scope(kid_records)
+            resolver = getattr(args, "_scope_resolver", None)
+            c_since, c_until, picked = (resolver(kid_records) if resolver
+                                        else choose_scope(kid_records))
             if c_since or c_until:
                 lo = c_since.strftime("%Y-%m-%d") if c_since else "the beginning"
                 hi = c_until.strftime("%Y-%m-%d") if c_until else "today"
@@ -1625,6 +1708,9 @@ def run(args):
                              kinds_filter=kinds_filter)
         ranged = any(s["since"] or s["until"] for s in sections)
         _print_download_summary(stats, out_dir, ranged)
+        on_stats = getattr(args, "_on_stats", None)
+        if on_stats:
+            on_stats(stats)
 
     if want_scrapbook:
         os.makedirs(os.path.dirname(feed_path), exist_ok=True)

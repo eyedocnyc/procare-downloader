@@ -8,8 +8,8 @@ echo Installing build tool (PyInstaller)...
 python -m pip install --quiet --disable-pip-version-check pyinstaller requests piexif
 
 echo Building ProcareDownloader.exe ...
-python -m PyInstaller --onefile --console --name ProcareDownloader ^
-  --hidden-import scrapbook --hidden-import updater --hidden-import piexif --noconfirm procare_download.py
+python -m PyInstaller --onefile --windowed --name ProcareDownloader ^
+  --hidden-import scrapbook --hidden-import updater --hidden-import gui --hidden-import piexif --noconfirm procare_download.py
 
 echo Assembling shareable package...
 python package_app.py
