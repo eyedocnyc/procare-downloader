@@ -33,11 +33,13 @@ HOW TO USE
 1. Double-click  ProcareDownloader.exe
    (Windows may show "Windows protected your PC" because the app isn't
     signed. Click "More info" then "Run anyway".)
-2. Choose option 1 (download everything + build the scrapbook).
-3. Type your school's name (optional), then your Procare email and
-   password. Your password is hidden as you type and is never saved.
-4. It downloads a year of photos/videos (can take a while the first time).
-   When done, your scrapbook opens automatically.
+2. A window opens. Choose "Download photos & videos AND build the
+   scrapbook" (recommended).
+3. Enter your Procare email and password in the window. Your password is
+   hidden as you type and is never saved.
+4. It downloads a year of photos/videos (can take a while the first time) --
+   keep the window open while it works. When done, your scrapbook opens
+   automatically.
 
 GOOD TO KNOW
 ------------
@@ -67,12 +69,13 @@ HOW TO USE
      - or: System Settings -> Privacy & Security -> "Open Anyway"
    You only need to do this once.
 
-2. A Terminal window opens. Choose option 1 (download everything + build
-   the scrapbook).
-3. Type your school's name (optional), then your Procare email and
-   password. Your password is hidden as you type and is never saved.
-4. It downloads a year of photos/videos (can take a while the first time).
-   When done, your scrapbook opens automatically.
+2. A window opens. Choose "Download photos & videos AND build the
+   scrapbook" (recommended).
+3. Enter your Procare email and password in the window. Your password is
+   hidden as you type and is never saved.
+4. It downloads a year of photos/videos (can take a while the first time) --
+   keep the window open while it works. When done, your scrapbook opens
+   automatically.
 
 GOOD TO KNOW
 ------------

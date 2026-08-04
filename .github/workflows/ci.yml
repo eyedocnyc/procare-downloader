@@ -36,7 +36,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Byte-compile all modules
-        run: python -m compileall procare_download.py scrapbook.py package_app.py tests
+        run: python -m compileall procare_download.py scrapbook.py updater.py gui.py package_app.py tests
 
       - name: Run regression tests
         run: python tests/test_core.py
