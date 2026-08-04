@@ -64,15 +64,27 @@ jobs:
           name: ProcareDownloader-${{ runner.os }}
           path: dist/ProcareDownloader-*.zip*
 
-      - name: Attach to Release (on version tags)
-        if: startsWith(github.ref, 'refs/tags/')
+  # Publish the Release exactly ONCE, after both OS builds. Doing this inside the
+  # build matrix ran action-gh-release twice (once per OS) against the same tag,
+  # and its generate_release_notes appended a second "What's Changed" block each
+  # time — hence the duplicated notes. A single release job with both artifacts
+  # avoids that (and the race between the two matrix jobs creating the release).
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download both OS build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist   # each artifact lands in dist/<artifact-name>/
+
+      - name: Publish Release with notes + files
         uses: softprops/action-gh-release@v2
         with:
-          # Let GitHub write the release body ("What's Changed" from merged PRs)
-          # instead of defaulting to the tagged commit's raw message — otherwise a
-          # squash-merge commit (with all its concatenated bodies + trailers) leaks
-          # into the notes.
+          # Let GitHub write the body ("What's Changed" from merged PRs) instead of
+          # the tagged commit's raw message (a squash-merge commit would otherwise
+          # leak its concatenated bodies + trailers into the notes).
           generate_release_notes: true
-          files: |
-            dist/ProcareDownloader-*.zip
-            dist/ProcareDownloader-*.zip.sha256
+          files: dist/**/ProcareDownloader-*.zip*

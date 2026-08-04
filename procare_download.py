@@ -1429,14 +1429,22 @@ def main():
         except Exception:
             pass
     # No command-line arguments (e.g. double-clicked .exe) -> friendly menu.
-    if len(sys.argv) == 1:
+    guided_mode = len(sys.argv) == 1
+    if guided_mode:
         args = guided(args)
     try:
         run(args)
     except KeyboardInterrupt:
         print("\nCancelled.")
+    except SystemExit as e:
+        # sys.exit(str) prints straight to stderr and the window would vanish
+        # before a double-click user ever reads it -- show it and keep going.
+        if e.code is not None:
+            print(e.code)
+    except Exception as e:
+        print(f"\nSomething went wrong: {e}")
     # When double-clicked, keep the window open so the user can read the result.
-    if len(sys.argv) == 1:
+    if guided_mode:
         try:
             input("\nPress Enter to close this window.")
         except EOFError:
@@ -1471,6 +1479,8 @@ def run(args):
         if args.zip:
             make_zip(out_dir)
         return
+
+    _warn_if_low_disk_space(out_dir)
 
     email = args.email or input("Procare email: ").strip()
     password = getpass.getpass("Procare password (input hidden): ")
@@ -1532,8 +1542,8 @@ def run(args):
     walk_end = date.today() if want_picker else (
         until_dt.date() if until_dt else date.today())
 
-    print("Reading the activity feed — this can take a minute or two for a full year,")
-    print("please wait (it isn't frozen)...")
+    print("Reading the activity feed — this walks your whole history month-by-month,")
+    print("so it can take several minutes for years of history (it isn't frozen)...")
     all_records = fetch_all_records(session, base, kids, walk_start, walk_end,
                                     debug=args.debug, out_dir=out_dir, reauth=reauth)
 
@@ -1634,6 +1644,21 @@ def run(args):
         make_zip(out_dir)
 
 
+LOW_DISK_SPACE_BYTES = 2 * 1024 ** 3  # 2 GB — years of full-res photos/video add up fast
+
+
+def _warn_if_low_disk_space(out_dir):
+    try:
+        free = shutil.disk_usage(out_dir).free
+    except OSError:
+        return  # e.g. no such path yet on some platforms -- not worth failing over
+    if free < LOW_DISK_SPACE_BYTES:
+        free_gb = free / 1024 ** 3
+        print(f"\nHeads up: only {free_gb:.1f} GB free on this drive. Downloading years of")
+        print("full-resolution photos and videos can use many GB -- free up space first")
+        print("if the run fails partway through.")
+
+
 def _print_download_summary(stats, out_dir, ranged):
     print("\nDownload summary:")
     print(f"  Downloaded:        {stats['downloaded']}")
@@ -1642,6 +1667,10 @@ def _print_download_summary(stats, out_dir, ranged):
         print(f"  Skipped (out of range): {stats['skipped_old']}")
     print(f"  Failed:            {stats['failed']}")
     print(f"  Files are in: {out_dir}  (organized by month)")
+    nothing_found = not any(stats[k] for k in ("downloaded", "skipped_exist", "skipped_old"))
+    if nothing_found:
+        print("\nNothing matched that selection. If this doesn't look right, try")
+        print("running again with 'Everything' or a wider date range.")
 
 
 if __name__ == "__main__":
