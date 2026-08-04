@@ -17,8 +17,9 @@ disappear when a child leaves or a subscription lapses. This tool saves it all, 
 > Procare web/mobile app uses, so it may break if Procare changes their service. Use it only for
 > your **own** child's account. Provided as-is, with no warranty.
 >
-> **Private by design.** Everything runs on your computer. Your password is entered at a hidden
-> prompt, used only to log in, and is **never saved or sent anywhere** except to Procare.
+> **Private by design.** Everything runs on your computer. Your password is entered directly into the
+> app (hidden as you type), used only to log in, and is **never saved or sent anywhere** except to
+> Procare.
 
 ---
 
@@ -40,23 +41,28 @@ checksum only proves your download matches the file published beside it on the r
 confirms the download wasn't corrupted or swapped in transit, not who authored it. (The apps are
 unsigned, so Windows SmartScreen / macOS Gatekeeper will still warn on first launch.)
 
-Then just follow the prompts:
+A window opens — just follow along:
 
-1. Choose **option 1** (download everything + build the scrapbook).
+1. Choose **"Download photos & videos AND build the scrapbook"** (recommended).
 2. Enter your Procare **email** and **password**.
-3. It downloads your media (the first run can take a while) and opens your scrapbook when done.
+3. It downloads your media (the first run can take a while — keep the window open) and opens your
+   scrapbook when done.
+
+*(If a window can't open — e.g. running from source on a machine without a display — it falls back
+to the same guided text menu it always had. Pass `--no-gui` to use that on purpose.)*
 
 Everything is saved next to the app in a `procare_media` folder. Open **`Open Scrapbook.html`** to
 browse it.
 
 ### Staying up to date
 
-On launch the app checks GitHub for a newer release. If there is one, it tells you and asks whether
-to update — say yes and it downloads the new version, **verifies it against the published SHA-256**,
-and swaps itself in place, then restarts on the new version. (Because the app downloads the update
-itself, the updated app usually launches without the one-time SmartScreen/Gatekeeper prompt.) Pass
-`--no-update-check` to skip the check, or `--version` to see which version you have. Running from
-source? The check just points you at the latest release / `git pull` instead.
+On launch the app checks GitHub for a newer release. If there is one, it asks whether to update
+(a small pop-up dialog in the window, or a text prompt in `--no-gui` mode) — say yes and it downloads
+the new version, **verifies it against the published SHA-256**, and swaps itself in place, then
+restarts on the new version. (Because the app downloads the update itself, the updated app usually
+launches without the one-time SmartScreen/Gatekeeper prompt.) Pass `--no-update-check` to skip the
+check, or `--version` to see which version you have. Running from source? The check just points you
+at the latest release / `git pull` instead.
 
 ---
 
@@ -68,8 +74,9 @@ source? The check just points you at the latest release / `git pull` instead.
 - **A scrapbook** — one HTML page per month plus a front page — showing each day's teacher notes
   and learning activities with the photos and videos embedded inline. Routine logs (meals, naps,
   sign in/out, bathroom) are condensed into a compact "daily log" line per day. The scrapbook is
-  titled with your child and class (e.g. *"Maya's Year in Emerald Lilies"*). Click any photo to view
-  it full-screen, and the front page shows a summary (photos, videos, notes, date range, busiest month).
+  titled with your child's name, with the class(es) they were in shown underneath (every class gets
+  its own date range if they moved partway through). Click any photo to view it full-screen, and the
+  front page shows a summary (photos, videos, notes, date range, busiest month).
 
 ```
 procare_media/
@@ -79,7 +86,8 @@ procare_media/
 ```
 
 **Multiple classes/years?** When run interactively, the app lists the classes it finds (with date
-ranges) and lets you pick one — handy for making a scrapbook for a single class or school year.
+ranges) in the window and lets you pick one — handy for making a scrapbook for a single class or
+school year.
 
 **More than one child?** Each child gets their **own** date-range choice and class name, with their
 media under `Media/<Child>/` and pages under `Scrapbook/<Child>/`. The top-level `Open Scrapbook.html`
@@ -114,8 +122,10 @@ python procare_download.py --scrapbook
 | `--overwrite` | Re-download files that already exist |
 | `--videos-only` | Only process videos |
 | `--debug` | Save one sample of each activity type to `debug_activities.json` |
+| `--no-gui` | Use the classic text-based prompts instead of the graphical window |
 
-Running with **no arguments** (or double-clicking the app) starts a friendly guided menu.
+Running with **no arguments** (or double-clicking the app) opens a friendly window — the same guided
+text menu as before if a window can't open (e.g. no display) or you pass `--no-gui`.
 
 ---
 
@@ -150,8 +160,8 @@ Both call `package_app.py` to assemble the shareable zip.
 
 ## Security & privacy
 
-- **Your password** is entered at a hidden prompt, used only to log in to Procare, and is never
-  saved or written anywhere.
+- **Your password** is entered directly into the app (hidden as you type), used only to log in to
+  Procare, and is never saved or written anywhere.
 - **Your login token goes only to Procare.** The tool attaches your session token *exclusively* to
   requests to Procare's own API hosts (`api-school.procareconnect.com` / `api-school.kinderlime.com`).
   The actual photos and videos are downloaded from Procare's CDN over separate, **unauthenticated**
