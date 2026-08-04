@@ -162,11 +162,12 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
 
 - **Guided mode** (no CLI args / double-clicked exe) always asks a scope menu after login:
   Everything / a specific class (with date span) / a custom date range. Per child when there are siblings.
-- Class name is auto-detected from the feed (`section.name`, only on attendance records) by **latest
-  activity date, not frequency** (`scrapbook.detect_class_name`) — a child who spent 8 months in one
-  room and then moved would otherwise have the new room's few records outvoted by the old room's many,
-  leaving the scrapbook title stuck on a class the child already left. School name is NOT auto-detected
-  (no reliable field) — only shown if `--school` is passed.
+- Class name is auto-detected from the feed (`section.name`, only on attendance records,
+  `scrapbook.detect_class_name` via `procare_download.class_spans`). A single class -> just its name
+  (unchanged title format). **Multiple classes** (a mid-year room move) -> every class listed with its
+  own date span, oldest first — not just whichever has the most attendance records or is most recent,
+  since either one alone would erase part of the child's actual history from the title. School name is
+  NOT auto-detected (no reliable field) — only shown if `--school` is passed.
 - Re-runs are idempotent (skip existing files, matched by stem across months).
 - `--scrapbook-only` rebuilds from `Scrapbook/feed.json` with no login (falls back to legacy root `feed.json`).
 - **The guided-mode window stays open on failure too, not just success.** `main()` catches `SystemExit`

@@ -282,27 +282,20 @@ def safe_name(name):
 
 
 def detect_class_name(records):
-    """Most recent class/room name from the feed (activiable.section.name).
+    """Class/room name(s) for the scrapbook title (activiable.section.name).
 
-    Picks by latest activity date rather than raw frequency -- a child who
-    spent 8 months in one room and then moved would otherwise have the new
-    room's few records outvoted by the old room's many (issue: scrapbook
-    title kept showing a class the child had since left)."""
-    best_dt, best_name = None, None
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        act = r.get("activiable")
-        sec = act.get("section") if isinstance(act, dict) else None
-        name = sec.get("name") if isinstance(sec, dict) else None
-        if not isinstance(name, str) or not name.strip():
-            continue
-        dt = record_dt(r)
-        if dt is None:
-            continue
-        if best_dt is None or dt > best_dt:
-            best_dt, best_name = dt, name.strip()
-    return best_name
+    A single class -> just its name, as before. Multiple classes (e.g. a
+    mid-year move to a new room) -> every class with its date span, oldest
+    first, so the title shows the whole history instead of one class name
+    outvoting -- or simply outdating -- the rest."""
+    spans = pd.class_spans(records)
+    if not spans:
+        return None
+    if len(spans) == 1:
+        return next(iter(spans))
+    ordered = sorted(spans.items(), key=lambda kv: kv[1][0])  # by first date
+    return ", ".join(f"{name} ({month_label(first[:7])} – {month_label(last[:7])})"
+                     for name, (first, last, _count) in ordered)
 
 
 def _pretty_day(dk):
