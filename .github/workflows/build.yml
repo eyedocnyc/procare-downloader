@@ -51,36 +51,9 @@ jobs:
 
       - name: Build the app
         run: >
-          pyinstaller --onefile --windowed --name ProcareDownloader
-          --hidden-import scrapbook --hidden-import updater --hidden-import gui --hidden-import piexif
+          pyinstaller --onefile --console --name ProcareDownloader
+          --hidden-import scrapbook --hidden-import updater --hidden-import piexif
           --noconfirm procare_download.py
-
-      # Catches "Tk itself won't bundle/init" packaging breakage (missing Tcl/Tk
-      # libs etc.) before it reaches users -- launch the built binary, confirm it
-      # starts without an immediate crash, then kill it. This can't catch visual
-      # issues, only outright failure to construct a Tk root.
-      - name: Smoke-test the built app opens a window (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $p = Start-Process -FilePath "dist\ProcareDownloader.exe" -PassThru
-          Start-Sleep -Seconds 3
-          if ($p.HasExited) {
-            Write-Error "ProcareDownloader.exe exited immediately (exit code $($p.ExitCode)) -- packaging is likely broken."
-            exit 1
-          }
-          Stop-Process -Id $p.Id -Force
-
-      - name: Smoke-test the built app opens a window (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          open dist/ProcareDownloader
-          sleep 3
-          if ! pgrep -f dist/ProcareDownloader > /dev/null; then
-            echo "::error::ProcareDownloader exited immediately -- packaging is likely broken."
-            exit 1
-          fi
-          pkill -f dist/ProcareDownloader
 
       - name: Package into a shareable zip
         run: python package_app.py

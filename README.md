@@ -17,9 +17,8 @@ disappear when a child leaves or a subscription lapses. This tool saves it all, 
 > Procare web/mobile app uses, so it may break if Procare changes their service. Use it only for
 > your **own** child's account. Provided as-is, with no warranty.
 >
-> **Private by design.** Everything runs on your computer. Your password is entered directly into the
-> app (hidden as you type), used only to log in, and is **never saved or sent anywhere** except to
-> Procare.
+> **Private by design.** Everything runs on your computer. Your password is entered at a hidden
+> prompt, used only to log in, and is **never saved or sent anywhere** except to Procare.
 
 ---
 
@@ -41,28 +40,23 @@ checksum only proves your download matches the file published beside it on the r
 confirms the download wasn't corrupted or swapped in transit, not who authored it. (The apps are
 unsigned, so Windows SmartScreen / macOS Gatekeeper will still warn on first launch.)
 
-A window opens — just follow along:
+Then just follow the prompts:
 
-1. Choose **"Download photos & videos AND build the scrapbook"** (recommended).
+1. Choose **option 1** (download everything + build the scrapbook).
 2. Enter your Procare **email** and **password**.
-3. It downloads your media (the first run can take a while — keep the window open) and opens your
-   scrapbook when done.
-
-*(If a window can't open — e.g. running from source on a machine without a display — it falls back
-to the same guided text menu it always had. Pass `--no-gui` to use that on purpose.)*
+3. It downloads your media (the first run can take a while) and opens your scrapbook when done.
 
 Everything is saved next to the app in a `procare_media` folder. Open **`Open Scrapbook.html`** to
 browse it.
 
 ### Staying up to date
 
-On launch the app checks GitHub for a newer release. If there is one, it asks whether to update
-(a small pop-up dialog in the window, or a text prompt in `--no-gui` mode) — say yes and it downloads
-the new version, **verifies it against the published SHA-256**, and swaps itself in place, then
-restarts on the new version. (Because the app downloads the update itself, the updated app usually
-launches without the one-time SmartScreen/Gatekeeper prompt.) Pass `--no-update-check` to skip the
-check, or `--version` to see which version you have. Running from source? The check just points you
-at the latest release / `git pull` instead.
+On launch the app checks GitHub for a newer release. If there is one, it tells you and asks whether
+to update — say yes and it downloads the new version, **verifies it against the published SHA-256**,
+and swaps itself in place, then restarts on the new version. (Because the app downloads the update
+itself, the updated app usually launches without the one-time SmartScreen/Gatekeeper prompt.) Pass
+`--no-update-check` to skip the check, or `--version` to see which version you have. Running from
+source? The check just points you at the latest release / `git pull` instead.
 
 ---
 
@@ -86,8 +80,7 @@ procare_media/
 ```
 
 **Multiple classes/years?** When run interactively, the app lists the classes it finds (with date
-ranges) in the window and lets you pick one — handy for making a scrapbook for a single class or
-school year.
+ranges) and lets you pick one — handy for making a scrapbook for a single class or school year.
 
 **More than one child?** Each child gets their **own** date-range choice and class name, with their
 media under `Media/<Child>/` and pages under `Scrapbook/<Child>/`. The top-level `Open Scrapbook.html`
@@ -122,10 +115,8 @@ python procare_download.py --scrapbook
 | `--overwrite` | Re-download files that already exist |
 | `--videos-only` | Only process videos |
 | `--debug` | Save one sample of each activity type to `debug_activities.json` |
-| `--no-gui` | Use the classic text-based prompts instead of the graphical window |
 
-Running with **no arguments** (or double-clicking the app) opens a friendly window — the same guided
-text menu as before if a window can't open (e.g. no display) or you pass `--no-gui`.
+Running with **no arguments** (or double-clicking the app) starts a friendly guided menu.
 
 ---
 
@@ -148,6 +139,14 @@ Both call `package_app.py` to assemble the shareable zip.
 
 ## Troubleshooting
 
+- **Windows says "Smart App Control blocked an app that may be unsafe" (no "Run anyway" option).**
+  This is a different, stricter mechanism than the usual SmartScreen warning above — it has no
+  in-dialog override, and it blocks any unsigned/unrecognized app regardless of what it does. If you
+  hit this, the practical workaround is to **run from source** instead (see below) — that's just
+  Python + a script, not an unsigned binary, so Smart App Control doesn't apply to it. You *can*
+  disable Smart App Control in Windows Security → App & browser control, but on most Windows 11
+  builds that's a **one-way switch** (you can only turn it back on via a clean reinstall of Windows),
+  so it's not something to do lightly just to run this tool.
 - **"Login failed: email or password is incorrect."** Verify at
   [schools.procareconnect.com](https://schools.procareconnect.com/). If you sign in with
   Google/Apple, set a regular Procare password first ("Forgot password").
@@ -160,8 +159,8 @@ Both call `package_app.py` to assemble the shareable zip.
 
 ## Security & privacy
 
-- **Your password** is entered directly into the app (hidden as you type), used only to log in to
-  Procare, and is never saved or written anywhere.
+- **Your password** is entered at a hidden prompt, used only to log in to Procare, and is never
+  saved or written anywhere.
 - **Your login token goes only to Procare.** The tool attaches your session token *exclusively* to
   requests to Procare's own API hosts (`api-school.procareconnect.com` / `api-school.kinderlime.com`).
   The actual photos and videos are downloaded from Procare's CDN over separate, **unauthenticated**
