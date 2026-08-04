@@ -249,6 +249,22 @@ def test_class_spans_and_range():
     assert pd.in_range(datetime(2024, 1, 1), since, until) is False
 
 
+def test_detect_class_name_single_class():
+    recs = [attend("k1", "2024-09-01", "Daffodils"), attend("k1", "2025-01-01", "Daffodils")]
+    assert sb.detect_class_name(recs) == "Daffodils"
+
+
+def test_detect_class_name_lists_every_class_with_its_span():
+    # 8 months in the old room, 2 in the new one -- both should appear with their
+    # own date range, not just whichever has the most attendance records (or is
+    # most recent) outvoting/overwriting the other.
+    recs = [attend("k1", f"2024-{m:02d}-01", "Toddler Room") for m in range(1, 9)]
+    recs += [attend("k1", f"2024-{m:02d}-01", "Preschool Room") for m in (10, 11)]
+    name = sb.detect_class_name(recs)
+    assert name == ("Toddler Room (January 2024 – August 2024), "
+                    "Preschool Room (October 2024 – November 2024)")
+
+
 def test_choose_scope_prompts_even_single_class():
     recs = [attend("k1", "2025-09-03", "Emerald Lilies"), attend("k1", "2026-06-20", "Emerald Lilies")]
     # default -> everything, but title class still returned
