@@ -41,7 +41,10 @@ echo "(Your password is hidden as you type and is never saved.)"
 echo
 
 if [ "$choice" = "2" ]; then
-  $PYTHON procare_download.py
+  # --out with its own default value is a harmless explicit flag -- it just
+  # keeps sys.argv non-empty so this doesn't trigger the guided menu/GUI a
+  # second time (this script already asked the same question above).
+  $PYTHON procare_download.py --out procare_media
 elif [ "$choice" = "3" ]; then
   $PYTHON procare_download.py --scrapbook-only
 else

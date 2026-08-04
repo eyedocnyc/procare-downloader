@@ -277,6 +277,55 @@ def test_choose_scope_prompts_even_single_class():
     assert s == datetime(2025, 10, 1) and u == datetime(2025, 12, 31, 23, 59, 59) and name is None
 
 
+def test_resolve_scope_direct_no_input_mocking_needed():
+    # Same decisions as test_choose_scope_prompts_even_single_class, but calling
+    # the pure function the GUI uses directly -- no input() mocking required.
+    recs = [attend("k1", "2025-09-03", "Emerald Lilies"), attend("k1", "2026-06-20", "Emerald Lilies")]
+    items = sorted(pd.class_spans(recs).items(), key=lambda kv: kv[1][0])
+    assert pd.resolve_scope(items, "1") == (None, None, "Emerald Lilies")
+    s, u, name = pd.resolve_scope(items, "2")
+    assert name == "Emerald Lilies" and s == datetime(2025, 9, 3)
+    s, u, name = pd.resolve_scope(items, "3", "2025-10-01", "2025-12-31")
+    assert s == datetime(2025, 10, 1) and u == datetime(2025, 12, 31, 23, 59, 59) and name is None
+    # blank/garbage choice -> same "everything" default as choose_scope
+    assert pd.resolve_scope(items, "") == (None, None, "Emerald Lilies")
+    assert pd.resolve_scope(items, "nope") == (None, None, "Emerald Lilies")
+
+
+def test_gui_available_respects_force_no_gui_env():
+    os.environ["PROCARE_FORCE_NO_GUI"] = "1"
+    try:
+        assert pd._gui_available() is False
+    finally:
+        del os.environ["PROCARE_FORCE_NO_GUI"]
+
+
+def test_decide_launch_mode():
+    assert pd._decide_launch_mode([], True) == "gui"
+    assert pd._decide_launch_mode([], False) == "guided"          # no display -> fall back
+    assert pd._decide_launch_mode(["--no-gui"], True) == "guided"  # explicit escape hatch
+    assert pd._decide_launch_mode(["--no-update-check"], True) == "gui"
+    assert pd._decide_launch_mode(["--no-gui", "--no-update-check"], True) == "guided"
+    assert pd._decide_launch_mode(["--email", "a@b.c"], True) == "cli"       # real flag -> untouched
+    assert pd._decide_launch_mode(["--scrapbook-only"], True) == "cli"
+
+
+def test_self_update_ask_callback_used_when_provided():
+    # A GUI-style `ask` callable replaces the TTY-gated _prompt_yes() path
+    # entirely (and doesn't need a real TTY/stdin to be consulted).
+    stub_release = {"tag_name": "v99.0", "assets": []}
+    orig_fetch, orig_asset, orig_frozen = up.fetch_latest, up.platform_asset, up.is_frozen
+    up.fetch_latest = lambda *a, **k: stub_release
+    up.platform_asset = lambda: ("ProcareDownloader-Mac.zip", "ProcareDownloader")
+    up.is_frozen = lambda: True
+    asked = []
+    try:
+        up._self_update("1.0", ask=lambda q: asked.append(q) or False)
+    finally:
+        up.fetch_latest, up.platform_asset, up.is_frozen = orig_fetch, orig_asset, orig_frozen
+    assert asked == ["Download and install it now?"]  # ask() was actually consulted, and declined
+
+
 # --- gallery routing helpers (mirror the structures collect_gallery produces) --- #
 def _section(kid_id, records=None, folder="", since=None, until=None):
     return {"name": f"kid-{kid_id}", "class_name": None, "kid_id": kid_id,
