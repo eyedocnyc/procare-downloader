@@ -203,7 +203,7 @@ in the PR that introduced this.
 - **`gui.py` is imported lazily**, only inside `main()`'s `if mode == "gui":` branch — never at module
   level in `procare_download.py` — so a CLI/scripted run (or a test) never needs `tkinter` installed.
   `tests/test_core.py` never calls `main()` either, so it doesn't need `tkinter` at all (confirmed: this
-  dev container doesn't have it installed, and the test suite still passes 61/61).
+  dev container doesn't have it installed, and the test suite still passes).
 - **`main()`'s launch decision** (`_decide_launch_mode`, pure/tested): `"cli"` for any real flag
   (`--email`, `--since`, `--scrapbook-only`, ...) — byte-for-byte the existing scripted behavior,
   untouched. Otherwise `"gui"` if a Tk window can actually be constructed (`_gui_available()` — probes
@@ -257,6 +257,36 @@ in the PR that introduced this.
   `main()`'s guided-menu decision a second, redundant time. Fixed by passing `--out procare_media`
   (its own default value — a no-op flag whose only purpose is making `sys.argv` non-empty) for that
   branch too. If you add a fourth choice to those scripts, give it a real/no-op flag too, not zero args.
+
+## This branch: `gui-experiment` — not merged to `main`
+
+This is a deliberately unmerged branch reviving the Tkinter GUI that `main` reverted (Smart App
+Control blocked it — see below). It exists to let the GUI be tried again without exposing `main`'s
+stable 1.x console users to an unproven build.
+
+- **Versioning stays on a `2.0-alphaN` track** (`APP_VERSION` in `procare_download.py`), never a bare
+  `1.x` or `2.0` — that keeps it from ever numerically colliding with a real release tag. Bump the
+  suffix (`2.0-alpha2`, `2.0-alpha3`, ...) each time you cut a new preview, same tag-must-equal-
+  `APP_VERSION` rule as any other release (`git tag v2.0-alphaN && git push origin v2.0-alphaN`).
+- **`build.yml`'s release step sets `prerelease: true`.** This is the actual safety mechanism, not the
+  version string: `updater.py`'s self-update check hits GitHub's `/releases/latest` API, which by
+  contract excludes prereleases and drafts — so stable 1.x users are never auto-upgraded into this
+  branch's builds. Testers install manually from the Releases page. **Do not flip this to `false` on
+  this branch** — only a real graduation release cut from `main` should ever be non-prerelease.
+- **Known unresolved risk, carried over from the first attempt (do not re-declare victory without
+  retesting this):** real-world testing on Windows 11 hit **Smart App Control (SAC)**, a stricter,
+  separate mechanism from classic SmartScreen. Unlike SmartScreen's "More info → Run anyway," SAC's
+  block dialog has **no override at all** — it just refuses to run unsigned/unrecognized apps. SAC is
+  subsystem-agnostic (evaluates code-signing/publisher reputation, not console vs. windowed PE
+  subsystem), so `--windowed` packaging does not fix this on its own, and neither would reverting to
+  `--console`. The two real fixes are code-signing (EV cert, recurring cost, uncertain payoff against
+  SAC specifically) or Microsoft Store distribution (the one option that actually satisfies SAC, at
+  the cost of real packaging/certification work). Neither is done. Verify on a real SAC-enabled Windows
+  11 machine before considering this ready to merge — the first attempt shipped to `main` and reached a
+  real user before this was discovered, which is exactly what the prerelease flag above now prevents.
+- **Graduation path**: once the GUI is proven (including the SAC question above) and someone decides to
+  ship it for real, merge this branch into `main` and cut a normal, non-prerelease `vX.Y` tag through
+  the usual flow below — don't just drop the `prerelease: true` flag on an alpha tag in place.
 
 ## Build & release
 
