@@ -282,17 +282,27 @@ def safe_name(name):
 
 
 def detect_class_name(records):
-    """Most common class/room name from the feed (activiable.section.name)."""
-    from collections import Counter
-    counts = Counter()
+    """Most recent class/room name from the feed (activiable.section.name).
+
+    Picks by latest activity date rather than raw frequency -- a child who
+    spent 8 months in one room and then moved would otherwise have the new
+    room's few records outvoted by the old room's many (issue: scrapbook
+    title kept showing a class the child had since left)."""
+    best_dt, best_name = None, None
     for r in records:
         if not isinstance(r, dict):
             continue
         act = r.get("activiable")
         sec = act.get("section") if isinstance(act, dict) else None
-        if isinstance(sec, dict) and isinstance(sec.get("name"), str) and sec["name"].strip():
-            counts[sec["name"].strip()] += 1
-    return counts.most_common(1)[0][0] if counts else None
+        name = sec.get("name") if isinstance(sec, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            continue
+        dt = record_dt(r)
+        if dt is None:
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt, best_name = dt, name.strip()
+    return best_name
 
 
 def _pretty_day(dk):

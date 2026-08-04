@@ -249,6 +249,14 @@ def test_class_spans_and_range():
     assert pd.in_range(datetime(2024, 1, 1), since, until) is False
 
 
+def test_detect_class_name_prefers_most_recent_over_most_common():
+    # 8 months in the old room, 2 in the new one -- title should follow the move,
+    # not the room with the most attendance records.
+    recs = [attend("k1", f"2024-{m:02d}-01", "Toddler Room") for m in range(1, 9)]
+    recs += [attend("k1", f"2024-{m:02d}-01", "Preschool Room") for m in (10, 11)]
+    assert sb.detect_class_name(recs) == "Preschool Room"
+
+
 def test_choose_scope_prompts_even_single_class():
     recs = [attend("k1", "2025-09-03", "Emerald Lilies"), attend("k1", "2026-06-20", "Emerald Lilies")]
     # default -> everything, but title class still returned
