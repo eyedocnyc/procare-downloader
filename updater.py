@@ -355,20 +355,16 @@ def _prompt_yes(question):
     return ans in ("", "y", "yes")
 
 
-def self_update(current_version, assume_yes=False, ask=None):
+def self_update(current_version, assume_yes=False):
     """Check for a newer release and, with the user's ok, install it. Best-effort:
-    swallows all errors so a failed or skipped update never blocks the real work.
-
-    `ask`: optional callable (question: str) -> bool, replacing the default
-    TTY input()-based confirm. Used by GUI launches (no console to prompt on)
-    to show a messagebox instead -- see procare_download._gui_ask_yes_no."""
+    swallows all errors so a failed or skipped update never blocks the real work."""
     try:
-        _self_update(current_version, assume_yes=assume_yes, ask=ask)
+        _self_update(current_version, assume_yes=assume_yes)
     except Exception:
         pass  # never let the updater crash the app
 
 
-def _self_update(current_version, assume_yes=False, ask=None):
+def _self_update(current_version, assume_yes=False):
     release = fetch_latest()
     if not release:
         return
@@ -387,14 +383,12 @@ def _self_update(current_version, assume_yes=False, ask=None):
         print(f"  or 'git pull' if you run from source):\n  {RELEASES_PAGE}\n")
         return
 
-    ask_fn = ask or _prompt_yes
-    interactive = True if ask is not None else sys.stdin.isatty()
+    interactive = sys.stdin.isatty()
     if not assume_yes and not interactive:
         # Don't block a scripted run waiting on input.
         print(f"  Run interactively to update, or download it:\n  {RELEASES_PAGE}\n")
         return
-    question = "Download and install it now?" if ask is not None else "Download and install it now? [Y/n]: "
-    if not assume_yes and not ask_fn(question):
+    if not assume_yes and not _prompt_yes("Download and install it now? [Y/n]: "):
         print("  Skipped. Continuing with the current version.\n")
         return
 

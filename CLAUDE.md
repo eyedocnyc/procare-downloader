@@ -15,9 +15,7 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 
 ## Files
 
-- `procare_download.py` — the engine: auth, feed fetch, media download, CLI + guided menu + GUI entry point.
-- `gui.py` — Tkinter GUI (login, mode menu, scope/class picker); imported lazily only when GUI mode
-  is actually selected, so it's never touched by CLI/scripted runs.
+- `procare_download.py` — the engine: auth, feed fetch, media download, CLI + guided menu.
 - `scrapbook.py` — HTML scrapbook generator (imported by the engine).
 - `updater.py` — startup self-update: checks GitHub Releases, verifies the SHA-256, swaps the binary.
 - `package_app.py` — assembles the shareable zip from a PyInstaller build (Win + Mac).
@@ -190,78 +188,29 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
   also flags when a selection matched nothing (all-zero stats) and suggests widening the scope — the raw
   "Downloaded: 0" line alone gave no guidance (issue #1 was reported as "No Activity Found").
 
-## GUI (Tkinter)
+## A GUI was tried and reverted — Smart App Control
 
-Launched double-click apps now open a real window instead of a terminal — Tkinter (stdlib) was chosen
-over `pywebview`/Electron because this app's whole value prop for non-technical parents is "double-click
-and it just works," and a webview backend needs a platform runtime (WebView2 on Windows, PyObjC/WKWebView
-on Mac) that isn't guaranteed present — a missing one means a blank window with no fix, worse than a
-plain-looking Tkinter form. This first pass covers **only the interactive parts** (login, top-level menu,
-scope/class picker) — live progress bars are a deliberate follow-up; see `Deliberately NOT doing` notes
-in the PR that introduced this.
+v2.0 briefly shipped a Tkinter GUI replacing the terminal prompts on double-click launch. Real-world
+testing on Windows 11 hit **Smart App Control (SAC)**: a stricter, separate mechanism from classic
+SmartScreen. Unlike SmartScreen's "More info → Run anyway," SAC's block dialog has **no override** at
+all — it just refuses to run unsigned/unrecognized apps.
 
-- **`gui.py` is imported lazily**, only inside `main()`'s `if mode == "gui":` branch — never at module
-  level in `procare_download.py` — so a CLI/scripted run (or a test) never needs `tkinter` installed.
-  `tests/test_core.py` never calls `main()` either, so it doesn't need `tkinter` at all (confirmed: this
-  dev container doesn't have it installed, and the test suite still passes 61/61).
-- **`main()`'s launch decision** (`_decide_launch_mode`, pure/tested): `"cli"` for any real flag
-  (`--email`, `--since`, `--scrapbook-only`, ...) — byte-for-byte the existing scripted behavior,
-  untouched. Otherwise `"gui"` if a Tk window can actually be constructed (`_gui_available()` — probes
-  `tkinter.Tk()`/destroy in a `try/except`; also respects `PROCARE_FORCE_NO_GUI` for CI/tests), else
-  `"guided"` (today's text menu) as the automatic fallback for headless/stripped environments. The
-  explicit escape hatch is `--no-gui`. Both `--no-gui` and `--no-update-check` alone still count as
-  "no real arguments" (`_GUIDED_COMPATIBLE_FLAGS`) so they don't force a `--email`-style required-args
-  error.
-- **`run()` is untouched** — no progress-callback plumbing was added through the feed scan, downloads,
-  or gallery walk for this pass. Instead, `gui.py` populates `args` with already-decided values
-  (`args.email`, `args.password` — a GUI-only in-memory attribute, never a CLI flag, so it can't leak
-  into shell history — `args.scrapbook`/`args.scrapbook_only`) before calling `run(args)`, so `run()`'s
-  existing `args.X or input(...)` guards are simply never reached.
-- **The one exception: `choose_scope()` always prompted unconditionally.** It's split into a pure
-  `resolve_scope(items, choice, custom_start, custom_finish)` (no I/O) plus the unchanged
-  `input()`-based wrapper. `run()` calls `args._scope_resolver(kid_records)` instead of `choose_scope()`
-  when that optional attribute is set. The GUI's resolver is a closure
-  (`gui.GuiIO.ask_scope`) that puts a request on a queue and **blocks the worker thread only** (not the
-  Tk mainloop) until the GUI thread shows the picker screen and the user answers — so `run()` still
-  fetches the activity feed exactly once, same as the CLI today, and the picker just appears mid-run
-  instead of before it. Don't reintroduce a duplicate "enumeration fetch" to show the picker earlier;
-  that was considered and rejected as a needless second network pass.
-- **Threading**: `run(args)` executes in a background thread (`gui.App._start_run`'s `worker()`); the
-  Tk mainloop stays responsive by polling a queue (`root.after(100, ...)`). `run()`'s existing `print()`
-  calls are captured for free by swapping `sys.stdout` to a queue-backed adapter (`gui.GuiIO`) for the
-  duration of the worker thread's call — **no changes to any `print()` call site were needed**. The
-  same queue also carries the `"ask_scope"` hand-off and the terminal `"done"` message (success or the
-  caught exception). `WM_DELETE_WINDOW` confirms before closing mid-download.
-- **Screen order deliberately mirrors the CLI's, not this plan's earlier draft**: Mode menu comes
-  *first*, then Login only if needed — `run()`'s `--scrapbook-only` fast path (rebuild from an existing
-  `feed.json`, no login at all) happens before the CLI ever prompts for credentials, so `gui.py` checks
-  the same condition (`_scrapbook_only_feed_exists`) after the mode choice and skips straight to the
-  run when it applies, instead of forcing a pointless login screen first.
-- **Update-prompt under GUI launch**: `updater.self_update()` takes an optional `ask: Callable[[str],
-  bool]` (default `None` = today's TTY-gated `_prompt_yes()`), so `updater.py` itself stays UI-agnostic
-  (doesn't import `tkinter`). GUI mode passes `procare_download._gui_ask_yes_no` — a throwaway hidden
-  `Tk()` root just for the `messagebox`, torn down before the real GUI's root is created. This also
-  fixes a real gap: without it, a windowed build with no console would have silently swallowed both the
-  update prompt *and* its non-interactive fallback message, with nothing visible anywhere.
-- **Packaging switched to `--windowed`** (was `--console`) with a new `--hidden-import gui`. A Tk init
-  failure under `--windowed` would otherwise exit with **no console and no window** — worse than today's
-  visible traceback — so `gui.launch_gui()` wraps its own startup and falls back to a dependency-free
-  native error box (`ctypes`/`MessageBoxW` on Windows, `osascript` on Mac) if constructing the very
-  first `Tk()` root throws. `build.yml` also smoke-tests each built binary (launch, confirm it doesn't
-  exit immediately, kill it) specifically to catch "Tk itself won't bundle" packaging breakage — macOS
-  Tcl/Tk + PyInstaller bundling has known historical quirks, so don't skip that step when touching the
-  build config.
-- The two `START HERE (*)` launcher scripts pre-select a mode via their own batch/shell menu, then call
-  `procare_download.py` with an explicit flag for two of the three choices — but the "download only"
-  choice used to call it with **zero** args, which (both before and after this GUI work) re-triggers
-  `main()`'s guided-menu decision a second, redundant time. Fixed by passing `--out procare_media`
-  (its own default value — a no-op flag whose only purpose is making `sys.argv` non-empty) for that
-  branch too. If you add a fourth choice to those scripts, give it a real/no-op flag too, not zero args.
+**SAC is subsystem-agnostic**, which is the key fact if this comes up again: it evaluates code
+signing/publisher reputation, not whether a binary is a console or windowed PE subsystem. Reverting the
+GUI back to `--console` does **not** fix a Smart App Control block — the plain console build is equally
+unsigned and would likely be blocked the same way. The GUI was reverted anyway because it wasn't
+solving anything for the SAC-affected user and hadn't been verified on a real Mac, not because console
+mode is somehow more SAC-friendly. The two real fixes are code-signing (EV cert, real recurring cost,
+uncertain payoff against SAC specifically for a low-volume free tool) or Microsoft Store distribution
+(the one option that actually solves it — Store apps are inherently trusted by SAC — but a real chunk
+of new packaging/certification work). Neither is done. The documented workaround for affected users is
+running from source (see README Troubleshooting) — not disabling SAC, which is a one-way switch on
+most Windows 11 builds and not something to casually recommend.
 
 ## Build & release
 
-- CI builds on `macos-latest` (Apple Silicon) + `windows-latest` via PyInstaller `--onefile --windowed`
-  with `--hidden-import scrapbook --hidden-import updater --hidden-import gui --hidden-import piexif`.
+- CI builds on `macos-latest` (Apple Silicon) + `windows-latest` via PyInstaller `--onefile --console`
+  with `--hidden-import scrapbook --hidden-import updater --hidden-import piexif`.
 - **Versioning: `APP_VERSION` in `procare_download.py` is the source of truth** and the self-updater
   compares against it. It MUST equal the release tag — `build.yml` fails the release build if
   `APP_VERSION != ${GITHUB_REF_NAME#v}`. So the release flow is: **bump `APP_VERSION` to `X.Y` in code →
