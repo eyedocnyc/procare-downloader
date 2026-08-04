@@ -142,6 +142,14 @@ shared by the download path and the renderer so filenames always agree
 (`media_stem` / `find_local_media`). Landing pages show a summary (`stats_html`); every page includes a
 photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use real relative paths
 (`rel_href`).
+- **The landing page `<h1>` never assumes a duration.** `_build_section` used to render
+  `"{who}'s Year in {class}"` and "A year of memories" — both wrong whenever the actual span is
+  shorter than a year, or (since `detect_class_name`'s multi-class fix) `class_name` is really a list
+  of several classes with their own spans. The `<h1>` is always just `"{who}'s Scrapbook"`; `class_name`
+  (single or multi-class) renders on its own line underneath; "A collection of memories" replaces the
+  duration claim, since the actual date range is already shown accurately by `stats_html`'s `statsub`
+  right below. The browser tab `<title>` (`title_full`) still includes the class name for context —
+  only the big visible heading was the problem.
 
 ## Security / privacy
 

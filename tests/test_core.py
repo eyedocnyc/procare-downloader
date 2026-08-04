@@ -11,6 +11,7 @@ class detection / date-range filtering, and the scrapbook folder layout for
 single vs. multiple children (including per-child media isolation).
 """
 import builtins
+import html
 import io
 import os
 import re
@@ -461,11 +462,29 @@ def test_layout_single_child():
     # tidy root: only the landing + Media/ + Scrapbook/
     assert set(os.listdir(out)) == {"Open Scrapbook.html", "Media", "Scrapbook"}
     land = open(os.path.join(out, "Open Scrapbook.html"), encoding="utf-8").read()
-    assert "Maya&#x27;s Year in Emerald Lilies" in land
+    assert "<h1>Maya&#x27;s Scrapbook</h1>" in land
+    assert "Emerald Lilies" in land
+    assert "A collection of memories" in land
     mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
     mpath = os.path.join(out, "Scrapbook", mp)
     src = first_media_src(open(mpath, encoding="utf-8").read())
     assert src and src.startswith("../Media/") and link_resolves(mpath, src)
+
+
+def test_layout_multi_class_name_renders_intact():
+    # class_name can be the multi-class "Room (span), Room (span)" string from
+    # detect_class_name -- it should render whole on its own line, not get mashed
+    # into a "Year in ..." title.
+    out = tempfile.mkdtemp(prefix="sb_multiclass_")
+    rec = photo_activity("k1", "2025-06-01", "p1")
+    plant(sb.media_root(out), rec)
+    multi_class = "Toddler Room (January 2024 – August 2024), Preschool Room (October 2024 – November 2024)"
+    sb.build_scrapbook([{"name": "Maya", "class_name": multi_class,
+                         "folder": "", "records": [rec]}], out)
+    land = open(os.path.join(out, "Open Scrapbook.html"), encoding="utf-8").read()
+    assert "<h1>Maya&#x27;s Scrapbook</h1>" in land
+    assert html.escape(multi_class) in land
+    assert "Year in" not in land
 
 
 def test_layout_multi_child_isolated():

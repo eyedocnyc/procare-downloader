@@ -349,7 +349,11 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
     write_css(pages_dir)
     landing_dir = os.path.dirname(landing_path)
     css_dir = os.path.join(pages_dir, "assets")
-    title = f"{who}'s Year in {class_name}" if class_name else f"{who}'s Scrapbook"
+    title = f"{who}'s Scrapbook"
+    # Class name goes in the tab title for context, but not the big visible <h1> --
+    # a child's actual span may be shorter than a year, or cover several classes
+    # (see the multi-class detect_class_name), so "Year in X" isn't reliably true.
+    title_full = f"{title} — {class_name}" if class_name else title
     context = " · ".join(p for p in (school, class_name) if p)
 
     by_month = OrderedDict()
@@ -378,7 +382,7 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
             body.append(render_day(dk, days[dk], media_dir, pages_dir))
         if nav:
             body.append(f'<div class="monthnav">{" ".join(nav)}</div>')
-        page = page_shell(f"{month_label(mk)} — {title}", "\n".join(body),
+        page = page_shell(f"{month_label(mk)} — {title_full}", "\n".join(body),
                           css_rel="assets/scrapbook.css")
         with open(os.path.join(pages_dir, month_filename(mk)), "w", encoding="utf-8") as fh:
             fh.write(page)
@@ -398,10 +402,12 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
                     f'<span class="sum">{esc(summary)}</span></li>')
 
     school_line = f'<div class="school">{esc(school)}</div>' if school else ""
+    class_line = f'<div class="who">{esc(class_name)}</div>' if class_name else ""
     body = f"""<header class="top">
   {school_line}
   <h1>{esc(title)}</h1>
-  <div class="who">A year of memories — {len(records):,} moments</div>
+  {class_line}
+  <div class="who">A collection of memories — {len(records):,} moments</div>
   {stats_html(records)}
 </header>
 <ul class="months">
@@ -411,7 +417,7 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
 videos in the Media folder. Generated {esc(datetime.now().strftime('%Y-%m-%d'))}.</footer>"""
     os.makedirs(landing_dir, exist_ok=True)
     with open(landing_path, "w", encoding="utf-8") as fh:
-        fh.write(page_shell(title, body, css_rel=rel_href(css_dir, landing_dir) + "/scrapbook.css"))
+        fh.write(page_shell(title_full, body, css_rel=rel_href(css_dir, landing_dir) + "/scrapbook.css"))
     return len(months)
 
 
