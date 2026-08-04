@@ -49,7 +49,7 @@ except ImportError:
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
 # bump it in the same change you intend to tag.
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
 
 import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
 
