@@ -166,6 +166,15 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
   NOT auto-detected (no reliable field) — only shown if `--school` is passed.
 - Re-runs are idempotent (skip existing files, matched by stem across months).
 - `--scrapbook-only` rebuilds from `Scrapbook/feed.json` with no login (falls back to legacy root `feed.json`).
+- **The guided-mode window stays open on failure too, not just success.** `main()` catches `SystemExit`
+  (raised by `_fail_login`, bad `--since`/`--until`, etc.) and bare `Exception`, prints the message, and
+  still runs the "Press Enter to close this window" pause — otherwise a double-clicked `.exe` flashes
+  shut before a parent can read why (e.g. a bad password). Don't let a new top-level error path bypass
+  this by exiting the process directly (`os._exit`, unguarded `sys.exit` outside `run()`, etc.).
+- `_warn_if_low_disk_space` prints a heads-up (not a hard stop) when free space on `out_dir`'s drive is
+  under `LOW_DISK_SPACE_BYTES` (2 GB), since years of full-res media can be many GB. `_print_download_summary`
+  also flags when a selection matched nothing (all-zero stats) and suggests widening the scope — the raw
+  "Downloaded: 0" line alone gave no guidance (issue #1 was reported as "No Activity Found").
 
 ## Build & release
 

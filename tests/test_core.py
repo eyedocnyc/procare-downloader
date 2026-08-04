@@ -11,11 +11,13 @@ class detection / date-range filtering, and the scrapbook folder layout for
 single vs. multiple children (including per-child media isolation).
 """
 import builtins
+import io
 import os
 import re
 import sys
 import tempfile
 import urllib.parse
+from contextlib import redirect_stdout
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -738,6 +740,51 @@ def test_download_caps_streamed_bytes_without_content_length():
     s = _FakeSession([_FakeResp(200, {}, (b"a" * 6, b"b" * 6))])
     assert up._download(s, "https://cdn/z.zip", dest, max_bytes=10) is False
     assert not os.path.exists(dest)
+
+
+class _FakeUsage:
+    def __init__(self, free):
+        self.free = free
+
+
+def test_warn_if_low_disk_space_prints_when_free_space_low():
+    orig = pd.shutil.disk_usage
+    pd.shutil.disk_usage = lambda path: _FakeUsage(pd.LOW_DISK_SPACE_BYTES - 1)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            pd._warn_if_low_disk_space("/some/dir")
+        assert "Heads up" in buf.getvalue()
+    finally:
+        pd.shutil.disk_usage = orig
+
+
+def test_warn_if_low_disk_space_silent_when_plenty():
+    orig = pd.shutil.disk_usage
+    pd.shutil.disk_usage = lambda path: _FakeUsage(pd.LOW_DISK_SPACE_BYTES * 10)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            pd._warn_if_low_disk_space("/some/dir")
+        assert buf.getvalue() == ""
+    finally:
+        pd.shutil.disk_usage = orig
+
+
+def test_download_summary_flags_nothing_found():
+    stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        pd._print_download_summary(stats, "/out", ranged=False)
+    assert "Nothing matched" in buf.getvalue()
+
+
+def test_download_summary_silent_when_something_found():
+    stats = {"downloaded": 3, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        pd._print_download_summary(stats, "/out", ranged=False)
+    assert "Nothing matched" not in buf.getvalue()
 
 
 def main():
