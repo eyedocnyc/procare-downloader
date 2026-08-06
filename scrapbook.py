@@ -198,14 +198,60 @@ def media_html(record, media_dir, pages_dir):
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
-def render_card(record, media_dir, pages_dir):
+def _group_key(record):
+    """Batch key for records Procare posted together. A multi-photo upload becomes
+    one `photo_activity` record per photo, but Procare stamps every one with the
+    same `activity_time`, `comment` and type -- so those three, matched exactly,
+    identify a single post. Grouping on it shows the shared caption once with all
+    the photos, and the exact-text match guarantees only photos that truly belong
+    together are merged (a caption reused on another day has a different time).
+
+    Only a precise `activity_time` can do that. Falling back to `activity_date`
+    would key on a whole DAY, merging every same-type record posted that day into
+    one card -- and where the caption is empty, which is most of them, that is
+    silently all of them. A record without a time gets a key of its own and stays
+    a card of its own."""
+    when = record.get("activity_time")
+    if not when:
+        return ("ungrouped", record.get("id") or id(record))
+    caption = " ".join((record.get("comment") or "").split())
+    return (record.get("activity_type"), when, caption)
+
+
+def group_records(records):
+    """Collapse content records into batches by `_group_key`, preserving first-seen
+    order. Returns a list of record lists (usually one record each)."""
+    groups, index = [], {}
+    for r in records:
+        key = _group_key(r)
+        if key in index:
+            groups[index[key]].append(r)
+        else:
+            index[key] = len(groups)
+            groups.append([r])
+    return groups
+
+
+def render_card(records, media_dir, pages_dir):
+    """Render one entry from a batch of records grouped by `_group_key`. Usually a
+    single record; for a multi-photo post the header and caption come from the
+    first record and every record's media is shown together in a grid."""
+    record = records[0]
     atype = record.get("activity_type", "unknown")
     emoji, label = TYPE_META.get(atype, ("•", atype.replace("_", " ").title()))
     dt = record_dt(record)
     staff = record.get("staff_present_name") or ""
     body = content_text(record)
-    media = media_html(record, media_dir, pages_dir)
-    meta = " · ".join(p for p in (fmt_time(dt), esc(staff)) if p)
+    kinds = [k for r in records for _, _, _, k in pd.collect_media_entries(r)]
+    media = "\n".join(media_html(r, media_dir, pages_dir) for r in records)
+    count = ""
+    if len(kinds) > 1:
+        media = f'<div class="media-grid">{media}</div>'
+        nphoto, nvideo = kinds.count("photo"), kinds.count("video")
+        bits = ([f"{nphoto} photos" if nphoto != 1 else "1 photo"] if nphoto else []) + \
+               ([f"{nvideo} videos" if nvideo != 1 else "1 video"] if nvideo else [])
+        count = " · ".join(bits)
+    meta = " · ".join(p for p in (fmt_time(dt), esc(staff), count) if p)
     return f"""<div class="card">
   <div class="card-head"><span class="badge">{emoji} {esc(label)}</span>
     <span class="meta">{meta}</span></div>
@@ -227,8 +273,8 @@ def render_day(dkey, records, media_dir, pages_dir):
         badges = " ".join(f'<span class="rb">{routine_summary(r)}</span>'
                           for r in sorted(routine, key=lambda r: record_dt(r) or datetime.min))
         parts.append(f'<div class="daily-log"><span class="dl-label">Daily log</span>{badges}</div>')
-    for r in content:
-        parts.append(render_card(r, media_dir, pages_dir))
+    for group in group_records(content):
+        parts.append(render_card(group, media_dir, pages_dir))
     parts.append("</section>")
     return "\n".join(parts)
 
@@ -534,6 +580,8 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .media{display:block;width:100%;max-width:640px;height:auto;border-radius:10px;
   margin:10px 0;background:#000;}
 img.media{cursor:zoom-in;}
+.media-grid{column-width:200px;column-gap:8px;margin:10px 0;}
+.media-grid .media{max-width:100%;margin:0 0 8px;break-inside:avoid;}
 .missing{color:#b00;background:#fff3f3;border:1px solid #f3d0d0;border-radius:8px;
   padding:8px 10px;font-size:.85rem;}
 .foot{max-width:820px;margin:40px auto;padding:16px 20px;color:var(--muted);

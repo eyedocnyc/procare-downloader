@@ -501,6 +501,48 @@ def test_layout_multi_class_name_renders_intact():
     assert html.escape(multi_class) in land
     assert "Year in" not in land
 
+def test_scrapbook_groups_same_caption_batch():
+    # A multi-photo post is one photo_activity record per photo, all sharing an
+    # exact activity_time + caption. They should render as ONE card (caption shown
+    # once, all photos in a grid); a same-time post with a DIFFERENT caption stays
+    # its own card -- proving the caption is part of the batch key.
+    out = tempfile.mkdtemp(prefix="sb_group_")
+    batch = [photo_activity("k1", "2025-06-01", pid, caption="Hand Print Murals!")
+             for pid in ("p1", "p2", "p3")]          # same kid+date -> same activity_time
+    other = photo_activity("k1", "2025-06-01", "p9", caption="Snack time")  # same time, other text
+    recs = batch + [other]
+    for r in recs:
+        plant(sb.media_root(out), r)
+    sb.build_scrapbook(
+        [{"name": "Maya", "class_name": "Room", "folder": "", "records": recs}], out)
+    mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
+    html = open(os.path.join(out, "Scrapbook", mp), encoding="utf-8").read()
+    assert html.count("Hand Print Murals!") == 1        # caption deduped, shown once
+    assert html.count("Snack time") == 1
+    assert html.count('<div class="card">') == 2        # batch card + standalone card
+    assert html.count('class="media-grid"') == 1        # only the 3-photo batch gets a grid
+    assert html.count('<img class="media"') == 4        # all 3 batch photos + the standalone
+
+
+def test_scrapbook_never_groups_records_without_a_time():
+    """Grouping keys on the exact activity_time. A record that only carries a
+    DATE must stay its own card: keying on the day would fold every same-type
+    record of that day into one, and with an empty caption -- the common case --
+    that is all of them."""
+    recs = [{"id": f"u{n}", "activity_type": "photo_activity",
+             "activity_date": "2025-06-01", "comment": "",
+             "activiable": {"id": f"u{n}", "main_url": f"https://x/u{n}.jpg"}}
+            for n in range(4)]
+    groups = sb.group_records(recs)
+    assert len(groups) == 4, "un-timed records must not collapse into one card"
+    assert all(len(g) == 1 for g in groups)
+    # A precise time still batches, so the fix does not disable grouping.
+    timed = [{"id": f"t{n}", "activity_type": "photo_activity",
+              "activity_time": "2025-06-01T10:00:00", "comment": "Murals!",
+              "activiable": {"id": f"t{n}", "main_url": f"https://x/t{n}.jpg"}}
+             for n in range(3)]
+    assert len(sb.group_records(timed)) == 1
+
 
 def test_layout_multi_child_isolated():
     out = tempfile.mkdtemp(prefix="sb_multi_")
