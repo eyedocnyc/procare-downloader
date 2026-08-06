@@ -99,6 +99,14 @@ pip install -r requirements.txt
 python procare_download.py --scrapbook
 ```
 
+Contributing? [uv](https://docs.astral.sh/uv/) sets up a dev environment (tests + linter) in one step:
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+```
+
 ### Options
 
 | Option | What it does |
