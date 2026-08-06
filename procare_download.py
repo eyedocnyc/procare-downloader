@@ -53,7 +53,6 @@ APP_VERSION = "1.15"
 
 import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
 
-
 # Procare changed domains over time; try the current one first, then the legacy one.
 BASE_URLS = [
     "https://api-school.procareconnect.com/api/web/",
@@ -701,12 +700,11 @@ def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
     stem = media_stem(dt, label, ident)
 
     # A previous run may have saved this with any extension; match on the stem.
-    if not overwrite:
-        if find_local_media(out_dir, dt, label, ident):
-            stats["skipped_exist"] += 1
-            if seen is not None:
-                seen.add(key)
-            return
+    if not overwrite and find_local_media(out_dir, dt, label, ident):
+        stats["skipped_exist"] += 1
+        if seen is not None:
+            seen.add(key)
+        return
 
     tmp = os.path.join(month_dir, stem + ".part")
     ok, head = download_file(session, media_session, url, tmp)
@@ -1247,7 +1245,7 @@ def in_range(dt, since_dt, until_dt):
         return True
     if since_dt and dt < since_dt:
         return False
-    if until_dt and dt > until_dt:
+    if until_dt and dt > until_dt:  # noqa: SIM103 - parallel guard clauses read better than a negated return
         return False
     return True
 

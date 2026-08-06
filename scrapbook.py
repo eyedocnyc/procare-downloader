@@ -24,7 +24,6 @@ from datetime import datetime
 
 import procare_download as pd
 
-
 # activity_type -> (emoji, label). Anything not listed still renders (generic).
 TYPE_META = {
     "note_activity": ("📝", "Note"),
@@ -143,9 +142,8 @@ def routine_summary(record):
     emoji = TYPE_META.get(atype, ("•", atype))[0]
 
     if atype == "meal_activity":
-        bits = " ".join(p for p in (data.get("type"), data.get("desc")) if p)
         qty = f" ({data.get('quantity')})" if data.get("quantity") else ""
-        return f"{emoji} {esc((data.get('type') or 'Meal'))}{esc(qty)}: {esc(data.get('desc') or '')}".strip().rstrip(":")
+        return f"{emoji} {esc(data.get('type') or 'Meal')}{esc(qty)}: {esc(data.get('desc') or '')}".strip().rstrip(":")
     if atype == "nap_activity":
         start = fmt_clock(data.get("start_time"))
         end = fmt_clock(data.get("end_time"))
@@ -182,7 +180,7 @@ def media_html(record, media_dir, pages_dir):
     """Inline <img>/<video> for media attached to this activity. Files live under
     `media_dir`; the link is relative to `pages_dir` (where the HTML page is)."""
     pieces = []
-    for url, dt, ident, kind in pd.collect_media_entries(record):
+    for _url, dt, ident, kind in pd.collect_media_entries(record):
         path = pd.find_local_media(media_dir, dt, kind, ident)
         if not path:
             pieces.append('<div class="missing">media file not found '

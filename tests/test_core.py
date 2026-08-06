@@ -22,10 +22,11 @@ from contextlib import redirect_stdout
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import procare_download as pd          # noqa: E402
-import scrapbook as sb                 # noqa: E402
-import updater as up                   # noqa: E402
-import hashlib as _hashlib             # noqa: E402
+import hashlib as _hashlib  # noqa: E402
+
+import procare_download as pd  # noqa: E402
+import scrapbook as sb  # noqa: E402
+import updater as up  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -53,7 +54,7 @@ def attend(kid, d, cls):
 
 
 def plant(media_dir, rec, ext=".jpg"):
-    for url, dt, ident, kind in pd.collect_media_entries(rec):
+    for _url, dt, ident, kind in pd.collect_media_entries(rec):
         md = os.path.join(media_dir, dt.strftime("%Y-%m"))
         os.makedirs(md, exist_ok=True)
         open(os.path.join(md, pd.media_stem(dt, kind, ident) + ext), "wb").write(b"\xff\xd8\xff\x00")
@@ -359,7 +360,6 @@ def test_gallery_step_count_and_progress():
     from datetime import date as _date
     # 1 kid, 2 endpoints, Aug+Sep (2 months): 2 * (1 unfiltered + 2 windows) = 6.
     assert pd.gallery_step_count(["k1"], _date(2024, 8, 1), _date(2024, 9, 30)) == 6
-    seen = []
     cb = pd._gallery_progress(4)
     for lbl in (None, "2024-08", "2024-09", "2024-10"):
         cb(lbl)                                 # must not raise; drives the \r line
@@ -379,7 +379,9 @@ def test_fetch_gallery_media_runs_unfiltered_and_windowed_passes():
                                "k1", _date(2024, 8, 1), _date(2024, 9, 30))
     finally:
         pd.fetch_json = orig
-    has_filter = lambda p, r: f"filters[{r}][datetime_from]" in p
+    def has_filter(p, r):
+        return f"filters[{r}][datetime_from]" in p
+
     # unfiltered pass: a query with the kid but NO datetime filter
     assert any(p.get("kid_id") == "k1" and not has_filter(p, "photo") and not has_filter(p, "video")
                for p in seen)
@@ -451,6 +453,19 @@ def test_first_name():
     assert sb.first_name({"name": "Patel, Maya"}) == "Maya"
     assert sb.first_name({"name": "Maya Patel"}) == "Maya"
     assert sb.first_name({"first_name": "Maya", "name": "Patel, Maya"}) == "Maya"
+
+
+def test_meal_summary():
+    # Type, quantity and description all surface; the emoji comes from TYPE_META.
+    assert sb.routine_summary({"activity_type": "meal_activity",
+                               "data": {"type": "Lunch", "desc": "pasta",
+                                        "quantity": "all"}}) == "🍽️ Lunch (all): pasta"
+    # A missing description must not leave a dangling colon.
+    assert sb.routine_summary({"activity_type": "meal_activity",
+                               "data": {"type": "Snack"}}) == "🍽️ Snack"
+    # A missing type falls back to the generic label.
+    assert sb.routine_summary({"activity_type": "meal_activity",
+                               "data": {"desc": "milk"}}) == "🍽️ Meal: milk"
 
 
 def test_layout_single_child():

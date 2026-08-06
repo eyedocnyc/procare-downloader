@@ -4,6 +4,14 @@ dist/
 *.spec
 __pycache__/
 
+# Dev tooling (uv.lock IS committed - it pins the dev toolchain)
+.venv/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
 # Downloaded media, scrapbook output, and the raw feed (PRIVATE - never commit)
 procare_media/
 old_procare_media/
