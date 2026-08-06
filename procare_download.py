@@ -1340,6 +1340,16 @@ def build_parser():
                          "replace corrupted ones)")
     ap.add_argument("--videos-only", action="store_true",
                     help="Only process videos (skip the photo/activity scan)")
+    # Data-type selection. Independent flags; if none is given, media is the default.
+    ap.add_argument("--media", action="store_true",
+                    help="Archive photos & videos (activity feed + gallery). This is the "
+                         "default when no data-type flag is given.")
+    ap.add_argument("--messages", action="store_true",
+                    help="Archive parent<->staff messages/chat (experimental): writes "
+                         "Messages/messages.json + messages.html and downloads any attachments. "
+                         "Honors --since/--until.")
+    ap.add_argument("--all-data", dest="all_data", action="store_true",
+                    help="Archive every supported data type (currently: media + messages).")
     ap.add_argument("--school", help="School name to show on the scrapbook "
                                      "(auto-detected from your account if omitted)")
     ap.add_argument("--class-name", dest="class_name",
@@ -1451,6 +1461,338 @@ def main():
             pass
 
 
+# --------------------------------------------------------------------------- #
+# Messages / chat (experimental)
+# --------------------------------------------------------------------------- #
+# Parent messaging is served to the MOBILE app -- the web app has no chat UI --
+# but parent/messages answers the web token fine. The item shape was confirmed
+# against a live parent account: {id, sender:{name}, message (HTML body),
+# posted_at, subject, message_type, thread, kids[], attachments[]}.
+#
+# Two findings that drive the code below:
+#   * `message_type` is the chat CHANNEL, not a priority or kind:
+#     parent_admin_com = Office Chat, general = Classroom Chat (the two folders
+#     the mobile app shows). Grouping uses this.
+#   * `thread` is the mailbox folder (always "inbox") and NOT a conversation id;
+#     parent/conversations comes back empty. These are standalone messages, so
+#     there is nothing to thread. A single default parent/messages pull returns
+#     the whole inbox, which already holds both the school's messages and the
+#     family's -- so "from us" is decided by SENDER (parent/carers), not folder.
+#
+# Only one account has been seen, so field lookups stay tolerant (several
+# candidate keys, 400/404 treated as "nothing here") and the raw JSON is ALWAYS
+# written first -- the readable transcript is derived, never the source of truth.
+CONVERSATIONS_PATH = "parent/conversations"
+MESSAGES_PATH = "parent/messages"
+CARERS_PATH = "parent/carers"          # the family members on the account
+MSG_SENDER_KEYS = ("sender_name", "from_name", "author_name", "staff_name",
+                   "sender", "author", "from", "user_name", "name")
+MSG_BODY_KEYS = ("body", "message", "text", "content", "comment", "body_text")
+# `message_type` maps to the two chat channels the mobile app shows. (`thread` is
+# just the mailbox folder, always "inbox" here, so it's not used for grouping.)
+MESSAGE_TYPE_LABELS = {"parent_admin_com": "Office Chat", "general": "Classroom Chat"}
+# Per-channel transcript colors: (background tint, accent). Family-sent messages
+# override this with their own "you / family" blue (see render_messages_html).
+CATEGORY_STYLES = {"Office Chat": ("#fff7ed", "#ea9010"),      # amber
+                   "Classroom Chat": ("#f0fdf4", "#22a35a")}   # green
+CATEGORY_DEFAULT_STYLE = ("#f4f4f6", "#9aa0a6")
+
+
+def _list_from(payload, *keys):
+    """Pull the list of items out of a payload of unknown shape: a bare list,
+    `{key: [...]}`, or `{data: ...}` wrapping either."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        d = payload.get("data")
+        d = d if isinstance(d, (dict, list)) else payload
+        if isinstance(d, list):
+            return d
+        if isinstance(d, dict):
+            for k in keys + ("results", "items"):
+                if isinstance(d.get(k), list):
+                    return d[k]
+    return []
+
+
+def _item_id(item):
+    """A stable-ish identity for dedup, whatever the item shape."""
+    if isinstance(item, dict):
+        for k in ("id", "uuid", "guid", "message_id"):
+            if item.get(k) is not None:
+                return f"id:{item[k]}"
+    return "hash:" + stable_media_ident(json.dumps(item, sort_keys=True, default=str))
+
+
+def _paginate(session, base, path, reauth, *list_keys, params=None):
+    """Collect every item from a paginated endpoint, deduping by id so an endpoint
+    that ignores `page` (returns the same list each request) terminates instead of
+    looping forever. `params` adds fixed query args (e.g. a mailbox filter). Quiet:
+    a 400/404 (endpoint absent here) yields []."""
+    items, seen, page = [], set(), 1
+    while page <= 500:
+        query = dict(params or {})
+        query["page"] = page
+        payload = fetch_json(session, base + path, query, path, reauth=reauth, quiet=True)
+        fresh = [it for it in _list_from(payload, *list_keys) if _item_id(it) not in seen]
+        if not fresh:
+            break
+        for it in fresh:
+            seen.add(_item_id(it))
+        items.extend(fresh)
+        page += 1
+    return items
+
+
+def _first_str(item, keys):
+    """First non-empty string among `keys`; if a key holds a dict, use its `name`."""
+    for k in keys:
+        v = (item or {}).get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict) and isinstance(v.get("name"), str):
+            return v["name"].strip()
+    return None
+
+
+def _message_dt(message):
+    # `posted_at` is Procare's real field; the rest are fallbacks for other shapes.
+    m = message or {}
+    for k in ("posted_at", "sent_at", "created_at", "timestamp", "time", "date"):
+        dt = _parse_dt(m.get(k))
+        if dt:
+            return dt
+    return find_capture_dt(m)
+
+
+def _html_escape(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _message_body_html(text):
+    """Safe HTML for a message body -- Procare's rich-text editor emits HTML.
+
+    All text is escaped; only `<a>` links (and bare URLs) survive, as real
+    clickable anchors, and only for http/https/mailto schemes. Every other tag and
+    attribute is dropped, so no script/style/handler can execute -- safe to embed in
+    the local transcript. The raw body stays untouched in messages.json."""
+    if not isinstance(text, str):
+        return ""
+    links = []
+
+    def _stash(mt):
+        href = mt.group(1).strip()
+        inner = re.sub(r"<[^>]+>", "", mt.group(2)).strip()
+        if not re.match(r"^(https?:|mailto:)", href, re.IGNORECASE):
+            return inner  # unsafe scheme -> keep the text, drop the link
+        links.append((href, inner or href))
+        return f"\x00{len(links) - 1}\x00"
+
+    t = re.sub(r'<a\b[^>]*?href="([^"]*)"[^>]*>(.*?)</a>', _stash, text,
+               flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.IGNORECASE)
+    t = re.sub(r"</p\s*>", "\n\n", t, flags=re.IGNORECASE)
+    t = re.sub(r"<[^>]+>", "", t)
+    for a, b in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'),
+                 ("&#39;", "'"), ("&nbsp;", " ")):
+        t = t.replace(a, b)
+    t = t.strip()
+    # Escape text and turn bare URLs into links, segment by segment.
+    out = []
+    for i, seg in enumerate(re.split(r"(https?://[^\s<]+)", t)):
+        out.append(f'<a href="{_html_escape(seg)}" target="_blank" rel="noopener">{_html_escape(seg)}</a>'
+                   if i % 2 else _html_escape(seg))
+    t = "".join(out)
+    for i, (href, inner) in enumerate(links):
+        anchor = f'<a href="{_html_escape(href)}" target="_blank" rel="noopener">{_html_escape(inner)}</a>'
+        t = t.replace(f"\x00{i}\x00", anchor)
+    return t.replace("\n", "<br>")
+
+
+def _is_from_us(message, our_ids, our_names):
+    """True if `message` was sent by a family member (a carer on the account),
+    matched by sender id or name -- so the transcript can style it differently."""
+    s = (message or {}).get("sender") or {}
+    return bool((s.get("id") and s.get("id") in our_ids)
+                or (s.get("name") and s.get("name") in our_names))
+
+
+def message_category(message):
+    """The chat channel from `message_type`: Office Chat (`parent_admin_com`) or
+    Classroom Chat (`general`); an unknown type is title-cased as a fallback."""
+    t = (message or {}).get("message_type")
+    return MESSAGE_TYPE_LABELS.get(t) or (t or "Messages").replace("_", " ").title()
+
+
+def message_fields(message):
+    """Best-effort (sender, body, dt, subject, category) from a message.
+
+    Procare's real shape: nested `sender`, `message` body, `posted_at`, `subject`,
+    and `message_type` -> the chat channel (Office/Classroom Chat). The
+    `parent/conversations` endpoint is empty — these are standalone messages, not
+    threads. Tolerates other field names."""
+    m = message or {}
+    return {"sender": _first_str(m, MSG_SENDER_KEYS), "body": _first_str(m, MSG_BODY_KEYS),
+            "dt": _message_dt(m), "subject": _first_str(m, ("subject", "title")),
+            "category": message_category(m)}
+
+
+def message_media_urls(message):
+    """Media/attachment URLs on a message (deduped). Reads only the `attachments`
+    field where real attachments live -- NOT the whole object -- so sender/child
+    profile-pic avatars are never mistaken for attachments; profile-pic paths are
+    skipped as a second guard."""
+    found = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+        elif (isinstance(o, str) and o.startswith(("http://", "https://"))
+              and _looks_like_media(o)
+              and not any(f in o.lower() for f in SKIP_URL_PATH_FRAGMENTS)):
+            found.append(o)
+
+    walk((message or {}).get("attachments"))
+    return list(dict.fromkeys(found))
+
+
+def category_colors(category):
+    """(background tint, accent) for a chat channel's section + school messages."""
+    return CATEGORY_STYLES.get(category, CATEGORY_DEFAULT_STYLE)
+
+
+def render_messages_html(conversations, messages, our_ids=frozenset(), our_names=frozenset()):
+    """A self-contained transcript grouped by chat channel (Office / Classroom),
+    newest first. Each channel is color-coded; the family's own messages
+    (`our_ids`/`our_names`) get a distinct blue "you / family" style regardless of
+    channel. Bodies keep clickable links; unparsable messages fall back to raw JSON
+    so nothing is hidden."""
+    esc = _html_escape
+    groups = {}
+    for m in messages:
+        f = message_fields(m)
+        groups.setdefault(f["category"], []).append((f, m))
+    for g in groups.values():
+        g.sort(key=lambda fm: fm[0]["dt"] or datetime.min, reverse=True)  # newest first
+
+    legend = " ".join(
+        f"<span style='border-bottom:3px solid {a}'>{esc(c)}</span>"
+        for c, (_bg, a) in CATEGORY_STYLES.items())
+    parts = ["<!doctype html><meta charset='utf-8'><title>Messages</title>",
+             "<style>body{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:760px;"
+             "margin:2rem auto;padding:0 1rem;color:#222}h2{padding-top:1.5rem}"
+             ".m{margin:.6rem 0;padding:.6rem .8rem;border-radius:10px}"
+             ".us{background:#e3f0ff;border:1px solid #bcdcff;margin-left:2.5rem}"
+             ".subj{font-weight:600}.meta{color:#777;font-size:.82em;margin:.1rem 0 .4rem}"
+             ".tag{color:#2563eb;font-weight:600}.body{white-space:pre-wrap}a{color:#2563eb}"
+             "pre{white-space:pre-wrap;background:#eee;padding:.5rem;border-radius:6px;font-size:.8em}</style>",
+             f"<h1>Messages</h1><p>{len(messages)} message(s), newest first. Channels: {legend}. "
+             "<span class='tag'>Blue, indented</span> = your family. "
+             "<code>messages.json</code> holds the complete raw data.</p>"]
+    for category in sorted(groups):
+        bg, accent = category_colors(category)
+        parts.append(f"<h2 style='border-bottom:2px solid {accent}'>{esc(category)}</h2>")
+        for f, m in groups[category]:
+            when = f["dt"].strftime("%Y-%m-%d %H:%M") if f["dt"] else ""
+            us = _is_from_us(m, our_ids, our_names)
+            tag = " <span class='tag'>· you / family</span>" if us else ""
+            meta = (f"<div class='subj'>{esc(f['subject'] or '(no subject)')}</div>"
+                    f"<div class='meta'>{esc(f['sender'] or 'Unknown')}{tag} · {esc(when)}</div>")
+            # Family messages: blue "us" style. School messages: the channel's tint.
+            attrs = "class='m us'" if us else f"class='m' style='background:{bg};border-left:3px solid {accent}'"
+            if f["body"]:
+                body = f"<div class='body'>{_message_body_html(f['body'])}</div>"
+            else:  # unparsed -> show the raw (scrubbed) message so nothing is lost
+                body = f"<pre>{esc(json.dumps(scrub_signed_urls(m), indent=2, default=str))}</pre>"
+            parts.append(f"<div {attrs}>{meta}{body}</div>")
+    return "\n".join(parts)
+
+
+def fetch_carers(session, base, reauth=None):
+    """The family members (carers) on the account, as [{id, name}] -- used to flag
+    which messages came from 'us'. Defensive/quiet: returns [] if unavailable."""
+    out = []
+    for c in _paginate(session, base, CARERS_PATH, reauth, "carers"):
+        if not isinstance(c, dict):
+            continue
+        name = (_first_str(c, ("name", "full_name"))
+                or " ".join(x for x in (c.get("first_name"), c.get("last_name")) if isinstance(x, str)))
+        out.append({"id": c.get("id"), "name": (name or "").strip() or None})
+    return out
+
+
+def archive_messages(session, media_session, base, out_dir, since_dt=None, until_dt=None, reauth=None):
+    """Fetch, archive, and render the parent's message threads (experimental).
+
+    Writes Messages/messages.json (raw, signed URLs stripped, owner-only) as the
+    source of truth, Messages/messages.html as a readable transcript, and
+    downloads any attachments. `since_dt`/`until_dt` keep only messages whose
+    timestamp falls in range (client-side — the API's own date-filter params are
+    unverified — so it's handy for pulling a few days to refine the format).
+    Returns the message count."""
+    print("Archiving messages (experimental)...")
+    conversations = _paginate(session, base, CONVERSATIONS_PATH, reauth, "conversations")
+    # The default query returns the full inbox, which already contains BOTH the
+    # school's messages and the family's (verified) -- there's no separate "sent".
+    messages = _paginate(session, base, MESSAGES_PATH, reauth, "messages")
+    if since_dt or until_dt:
+        messages = [m for m in messages if in_range(message_fields(m)["dt"], since_dt, until_dt)]
+    if not conversations and not messages:
+        print("  No messages returned by the parent API — messaging may be mobile-only "
+              "on this account (the web app has no chat), or there simply aren't any.")
+        return 0
+
+    msg_dir = os.path.join(out_dir, "Messages")
+    os.makedirs(msg_dir, exist_ok=True)
+    write_private_json(os.path.join(msg_dir, "messages.json"),
+                       {"conversations": scrub_signed_urls(conversations),
+                        "messages": scrub_signed_urls(messages)})
+
+    att_dir = os.path.join(msg_dir, "attachments")
+    stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
+    seen = set()
+    for m in messages:
+        for url in message_media_urls(m):
+            dt = message_fields(m)["dt"] or datetime.now()
+            kind = media_kind(url) or "photo"
+            ident = id_from_url(url) or stable_media_ident(url)
+            save_media(session, media_session, url, dt, kind, ident, att_dir, None, stats,
+                       ".jpg" if kind == "photo" else ".mp4", seen=seen)
+
+    # Family members, to style "our" messages differently from the school's.
+    carers = fetch_carers(session, base, reauth)
+    our_ids = {c["id"] for c in carers if c.get("id")}
+    our_names = {c["name"] for c in carers if c.get("name")}
+    ours = sum(1 for m in messages if _is_from_us(m, our_ids, our_names))
+
+    html_path = os.path.join(msg_dir, "messages.html")
+    with open(html_path, "w", encoding="utf-8") as fh:
+        fh.write(render_messages_html(conversations, messages, our_ids, our_names))
+    if os.name == "posix":
+        try:
+            os.chmod(html_path, 0o600)
+        except OSError:
+            pass
+    print(f"  {len(messages)} message(s) ({ours} from your family), "
+          f"{stats['downloaded']} attachment(s) -> Messages/messages.html")
+    return len(messages)
+
+
+def select_data(args):
+    """Which data types to archive, as {name: bool}. The flags are independent:
+    `--media`, `--messages` (and `--all-data`, which turns on everything) each
+    stand alone, so you can archive just one kind. When no data-type flag is
+    given at all, default to media -- the historical behavior."""
+    chosen = args.media or args.messages or getattr(args, "all_data", False)
+    return {"media": args.media or args.all_data or not chosen,
+            "messages": args.messages or args.all_data}
+
+
 def run(args):
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
@@ -1519,6 +1861,13 @@ def run(args):
     def reauth():
         """Re-login if the session token expires during a long run."""
         authenticate(session, email, password)
+
+    # Independent data types: archive each selected kind, skip the rest.
+    want = select_data(args)
+    if want["messages"]:
+        archive_messages(session, media_session, base, out_dir, since_dt, until_dt, reauth=reauth)
+    if not want["media"]:
+        return
 
     kids_meta = get_kids_meta(session, base)
     kids = [k["id"] for k in kids_meta]

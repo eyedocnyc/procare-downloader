@@ -79,6 +79,12 @@ procare_media/
   Media/                 <- all photos & videos, organized by month (YYYY-MM/)
 ```
 
+**Messages (experimental).** `--messages` archives the parent/staff message inbox to `Messages/` — the
+raw `messages.json` plus a readable `messages.html` transcript, grouped and colour-coded by chat channel
+(Office vs. Classroom), newest first, with your family's own messages styled distinctly. Note parent
+messaging is a **mobile-only** feature in Procare, so the web app shows no chat UI even though the API
+works. The data-type flags are independent: `--messages` on its own skips the photo download entirely.
+
 **Multiple classes/years?** When run interactively, the app lists the classes it finds (with date
 ranges) and lets you pick one — handy for making a scrapbook for a single class or school year.
 
@@ -112,6 +118,9 @@ python procare_download.py --scrapbook
 | `--class-name "Name"` | Class/room name (auto-detected from the feed if omitted) |
 | `--since YYYY-MM-DD` | Only include media on/after this date |
 | `--until YYYY-MM-DD` | Only include media on/before this date |
+| `--media` | Archive photos/videos + scrapbook (the default when no data-type flag is given) |
+| `--messages` | **Experimental.** Archive the parent/staff message inbox to `Messages/` |
+| `--all-data` | Archive everything the tool knows how to fetch |
 | `--overwrite` | Re-download files that already exist |
 | `--videos-only` | Only process videos |
 | `--debug` | Save one sample of each activity type to `debug_activities.json` |
