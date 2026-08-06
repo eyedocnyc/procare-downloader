@@ -178,6 +178,10 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
   NOT auto-detected (no reliable field) — only shown if `--school` is passed.
 - Re-runs are idempotent (skip existing files, matched by stem across months).
 - `--scrapbook-only` rebuilds from `Scrapbook/feed.json` with no login (falls back to legacy root `feed.json`).
+- **`--password-stdin`** reads the password from stdin's first line (`read_password`) for scripted runs
+  (e.g. `op read … | … --password-stdin`). Empty stdin **exits** rather than logging in blank — a blank
+  password would burn one of the few attempts before Procare locks the account. Never accept the
+  password as a CLI flag instead; that would put it in `ps` output and shell history.
 - **The guided-mode window stays open on failure too, not just success.** `main()` catches `SystemExit`
   (raised by `_fail_login`, bad `--since`/`--until`, etc.) and bare `Exception`, prints the message, and
   still runs the "Press Enter to close this window" pause — otherwise a double-clicked `.exe` flashes
