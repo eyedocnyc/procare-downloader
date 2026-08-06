@@ -822,6 +822,98 @@ def test_download_summary_silent_when_something_found():
     assert "Nothing matched" not in buf.getvalue()
 
 
+# --------------------------------------------------------------------------- #
+# messages / chat (experimental, defensive parsing)
+# --------------------------------------------------------------------------- #
+def test_list_from_handles_unknown_shapes():
+    assert pd._list_from([1, 2]) == [1, 2]
+    assert pd._list_from({"messages": [{"id": 1}]}, "messages") == [{"id": 1}]
+    assert pd._list_from({"data": {"conversations": [{"id": 9}]}}, "conversations") == [{"id": 9}]
+    assert pd._list_from({"nope": 1}, "messages") == []
+    assert pd._list_from(None) == []
+
+
+def test_message_fields_matches_real_shape():
+    # Procare's real message: nested `sender`, `message` body, `posted_at`, `subject`,
+    # and `message_type` -> the chat channel (Office/Classroom).
+    f = pd.message_fields({"id": "m1", "sender": {"name": "Ms. A"}, "message": "<p>Hi!</p>",
+                           "posted_at": "2026-07-05T09:00:00Z", "message_type": "general",
+                           "subject": "Field trip"})
+    assert f["sender"] == "Ms. A" and f["body"] == "<p>Hi!</p>"   # raw body kept
+    assert f["category"] == "Classroom Chat" and f["subject"] == "Field trip" and f["dt"].year == 2026
+    # Tolerates other field names/shapes.
+    f2 = pd.message_fields({"sender_name": "Dad", "text": "ok", "sent_at": "2025-06-02",
+                            "message_type": "parent_admin_com"})
+    assert f2["sender"] == "Dad" and f2["body"] == "ok" and f2["category"] == "Office Chat"
+    assert f2["dt"].year == 2025
+    # Unknown/absent type falls back gracefully.
+    assert pd.message_category({"message_type": "weird_new_type"}) == "Weird New Type"
+    assert pd.message_category({}) == "Messages"
+
+
+def test_message_body_html_links_and_escaping():
+    # <a> becomes a real clickable anchor; script/text is escaped, tags dropped.
+    out = pd._message_body_html('Sign up <a href="https://forms.gle/x">here</a> <b>now</b>')
+    assert '<a href="https://forms.gle/x" target="_blank" rel="noopener">here</a>' in out
+    assert "<b>" not in out and "now" in out
+    # Bare URLs get linkified; special chars are HTML-escaped; unknown tags dropped.
+    out2 = pd._message_body_html("see https://zoom.us/j/1 & more <tag>")
+    assert '<a href="https://zoom.us/j/1' in out2 and "&amp;" in out2 and "<tag>" not in out2
+    # A javascript: link is neutralized (kept as text, not an anchor).
+    assert "<a" not in pd._message_body_html('<a href="javascript:alert(1)">x</a>')
+
+
+def test_is_from_us_matches_family_sender():
+    fam_id, fam_names = {"u1"}, {"Jamie Lee"}
+    assert pd._is_from_us({"sender": {"id": "u1", "name": "Ray"}}, fam_id, fam_names)   # by id
+    assert pd._is_from_us({"sender": {"name": "Jamie Lee"}}, fam_id, fam_names)        # by name
+    assert not pd._is_from_us({"sender": {"id": "s9", "name": "Ms. A"}}, fam_id, fam_names)
+
+
+def test_message_media_urls_reads_attachments_only():
+    m = {"message": "see this",
+         "attachments": [{"url": "https://cdn/msgs/files/a1/main/a1.jpg?sig=1"}],
+         # A profile pic OUTSIDE attachments must be ignored (we only read attachments),
+         "sender": {"name": "Ms. A", "profile_pic_url": "https://cdn/photos/x/main/av.jpg"}}
+    assert pd.message_media_urls(m) == ["https://cdn/msgs/files/a1/main/a1.jpg?sig=1"]
+    # And a profile pic INSIDE attachments is still skipped by path fragment.
+    m2 = {"attachments": [{"url": "https://cdn/profile_pics/files/t/main/t.jpg"}]}
+    assert pd.message_media_urls(m2) == []
+
+
+def test_render_messages_html_channels_family_style_and_order():
+    msgs = [{"message_type": "general", "sender": {"name": "Ms. A"}, "subject": "Older",
+             "message": '<p>Visit <a href="https://x.test/a">link</a></p>',
+             "posted_at": "2025-06-01T10:00:00Z"},
+            {"message_type": "general", "sender": {"id": "u1", "name": "Jamie Lee"}, "subject": "Newer",
+             "message": "Thanks!", "posted_at": "2025-06-02T10:00:00Z"},
+            {"message_type": "parent_admin_com", "sender": {"name": "Director"}, "subject": "Office note",
+             "message": "FYI", "posted_at": "2025-06-01T09:00:00Z"},
+            {"message_type": "general", "weird_field": "no parseable body",
+             "posted_at": "2025-06-03T10:00:00Z"}]
+    html = pd.render_messages_html([], msgs, our_ids={"u1"}, our_names={"Jamie Lee"})
+    assert "Classroom Chat</h2>" in html and "Office Chat</h2>" in html   # channel sections
+    assert "#22a35a" in html and "#ea9010" in html                       # per-channel color-coding
+    assert 'href="https://x.test/a"' in html                             # clickable anchor
+    assert "class='m us'" in html and "you / family" in html             # family styling
+    assert "weird_field" in html                                         # bodyless -> raw JSON
+    # Reverse chronological within a channel: newest ("Newer") before oldest ("Older").
+    assert html.index("Newer") < html.index("Older")
+
+
+def test_select_data_independent_flags():
+    import types
+
+    def A(media=False, messages=False, all_data=False):
+        return types.SimpleNamespace(media=media, messages=messages, all_data=all_data)
+
+    assert pd.select_data(A()) == {"media": True, "messages": False}              # default -> media
+    assert pd.select_data(A(media=True)) == {"media": True, "messages": False}
+    assert pd.select_data(A(messages=True)) == {"media": False, "messages": True}  # independent
+    assert pd.select_data(A(all_data=True)) == {"media": True, "messages": True}
+    assert pd.select_data(A(media=True, messages=True)) == {"media": True, "messages": True}
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
