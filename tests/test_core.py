@@ -821,6 +821,50 @@ def test_download_summary_silent_when_something_found():
         pd._print_download_summary(stats, "/out", ranged=False)
     assert "Nothing matched" not in buf.getvalue()
 
+# --------------------------------------------------------------------------- #
+# activity vs. gallery media filing
+# --------------------------------------------------------------------------- #
+def test_is_gallery_record():
+    assert pd.is_gallery_record(pd.gallery_entry_to_record(
+        "https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1), "g1", "photo", "k1"))
+    assert not pd.is_gallery_record(photo_activity("k1", "2025-06-01", "p1"))
+
+
+def test_find_local_media_looks_in_gallery_subtree():
+    out = tempfile.mkdtemp(prefix="pd_gal_")
+    dt = datetime(2025, 6, 1, 10)
+    gdir = os.path.join(out, pd.GALLERY_SUBDIR, "2025-06")
+    os.makedirs(gdir)
+    open(os.path.join(gdir, pd.media_stem(dt, "photo", "g1") + ".jpg"), "wb").write(b"\xff\xd8\xff\x00")
+    found = pd.find_local_media(out, dt, "photo", "g1")
+    assert found and pd.GALLERY_SUBDIR in found
+
+
+def test_media_month_dir_routes_gallery():
+    dt = datetime(2025, 6, 1, 10)
+    assert pd.media_month_dir("/out", dt) == os.path.join("/out", "2025-06")
+    assert pd.media_month_dir("/out", dt, gallery=True) == os.path.join(
+        "/out", pd.GALLERY_SUBDIR, "2025-06")
+
+
+def test_download_records_files_gallery_directly():
+    # download_records tells save_media gallery=True for gallery records and False
+    # for activity records, so untagged media lands in Gallery/ at download time
+    # (no later move needed -- no empty month dir left behind).
+    dt = datetime(2025, 6, 1, 10)
+    act = photo_activity("k1", "2025-06-01", "p1")
+    gal = pd.gallery_entry_to_record(
+        "https://cdn/photos/files/g1/main/g1.jpg", dt, "g1", "photo", "k1")
+    flags = {}
+    orig = pd.save_media
+    pd.save_media = lambda *a, **k: flags.__setitem__(a[5], k.get("gallery"))
+    try:
+        stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
+        pd.download_records(None, None, [act, gal], "/out", None, None, stats)
+    finally:
+        pd.save_media = orig
+    assert flags == {"p1": False, "g1": True}
+
 
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

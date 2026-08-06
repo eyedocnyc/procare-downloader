@@ -644,6 +644,20 @@ def apply_timestamp(path, dt):
 
 
 # --------------------------------------------------------------------------- #
+# Activity vs. gallery classification
+# --------------------------------------------------------------------------- #
+GALLERY_SUBDIR = "Gallery"  # untagged, account-wide media is filed here
+
+
+def is_gallery_record(record):
+    """True if this record came from the account-wide gallery (no per-child tag).
+
+    `gallery_entry_to_record` names these with an id like `gallery-photo-<uuid>`;
+    everything else is a real activity-feed post tied to specific children."""
+    return str((record or {}).get("id") or "").startswith("gallery-")
+
+
+# --------------------------------------------------------------------------- #
 # Saving + feed loops
 # --------------------------------------------------------------------------- #
 def media_stem(dt, label, ident):
@@ -652,24 +666,42 @@ def media_stem(dt, label, ident):
     return f"{dt.strftime('%Y-%m-%d_%H%M%S')}_{label}_{ident}"
 
 
+def media_month_dir(out_dir, dt, gallery=False):
+    """The folder a media item is saved into: the `Gallery/` subtree for untagged,
+    account-wide gallery media, the plain month folder otherwise. Shared by the
+    download path and `find_local_media` so a file's home is decided in one place."""
+    base = os.path.join(out_dir, GALLERY_SUBDIR) if gallery else out_dir
+    return os.path.join(base, dt.strftime("%Y-%m"))
+
+
 def find_local_media(out_dir, dt, label, ident):
-    """Return the path to an already-downloaded media file (any extension), or None."""
+    """Return the path to an already-downloaded media file (any extension), or None.
+
+    Looks in the activity month folder AND the `Gallery/` subtree, since untagged
+    gallery media is filed under `Gallery/<month>/` (see `media_month_dir`)."""
     ident = str(ident)
-    month_dir = os.path.join(out_dir, dt.strftime("%Y-%m"))
     stem = media_stem(dt, label, ident)
-    matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
-               if not p.endswith(".part")]
-    if matches:
-        return matches[0]
-    # Fallback: the same label+ident in any month (the timestamp/month recorded
-    # at download time may differ slightly from the lookup), since ident is unique.
-    pat = os.path.join(glob.escape(out_dir), "*", f"*_{label}_{glob.escape(ident)}.*")
-    matches = [p for p in glob.glob(pat) if not p.endswith(".part")]
-    return matches[0] if matches else None
+    gallery_root = os.path.join(out_dir, GALLERY_SUBDIR)
+    # Fast path: the exact month folder in either the activity or the gallery tree.
+    for base in (out_dir, gallery_root):
+        month_dir = os.path.join(base, dt.strftime("%Y-%m"))
+        matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
+                   if not p.endswith(".part")]
+        if matches:
+            return matches[0]
+    # Fallback: same label+ident in any month of either tree (the recorded month
+    # may differ slightly from the lookup), since ident is unique.
+    for pat in (os.path.join(glob.escape(out_dir), "*", f"*_{label}_{glob.escape(ident)}.*"),
+                os.path.join(glob.escape(gallery_root), "*", f"*_{label}_{glob.escape(ident)}.*")):
+        matches = [p for p in glob.glob(pat) if not p.endswith(".part")]
+        if matches:
+            return matches[0]
+    return None
 
 
 def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
-               stats, default_ext, seen=None, overwrite=False, until_dt=None):
+               stats, default_ext, seen=None, overwrite=False, until_dt=None,
+               gallery=False):
     """Download one media item into its monthly folder and timestamp it.
 
     `session` is the authenticated Procare session; `media_session` is the
@@ -696,7 +728,7 @@ def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
         stats["skipped_exist"] += 1
         return
 
-    month_dir = os.path.join(out_dir, dt.strftime("%Y-%m"))
+    month_dir = media_month_dir(out_dir, dt, gallery)
     os.makedirs(month_dir, exist_ok=True)
     stem = media_stem(dt, label, ident)
 
@@ -1283,13 +1315,14 @@ def download_records(session, media_session, records, out_dir, since_dt, until_d
     """Download the photos/videos attached to the given activity records."""
     total = len(records)
     for idx, it in enumerate(records):
+        gallery = is_gallery_record(it)
         for media_url, dt, ident, kind in collect_media_entries(it):
             if kinds_filter and kind not in kinds_filter:
                 continue
             default_ext = ".mp4" if kind == "video" else ".jpg"
             save_media(session, media_session, media_url, dt, kind, ident, out_dir,
                        since_dt, stats, default_ext, seen=seen, overwrite=overwrite,
-                       until_dt=until_dt)
+                       until_dt=until_dt, gallery=gallery)
         if total and (idx + 1) % 200 == 0:
             print(f"  ...scanned {idx + 1}/{total} activities "
                   f"(downloaded {stats['downloaded']}, skipped {stats['skipped_exist']})")

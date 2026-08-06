@@ -151,6 +151,18 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
   right below. The browser tab `<title>` (`title_full`) still includes the class name for context —
   only the big visible heading was the problem.
 
+**Untagged gallery media is filed apart, under `Media/[<Child>/]Gallery/YYYY-MM/`.** The activity feed
+tags each post with `kid_ids`, so an activity photo is known to be of *this* child. The gallery does
+not: it is account-wide and child-agnostic, so on a multi-child room its photos may be of classmates.
+Mixing the two into one month folder makes "keep only photos of my child" impossible after the fact.
+`download_records` asks `is_gallery_record` (id prefixed `gallery-`, set by `gallery_entry_to_record`)
+and passes the flag to `save_media`, which resolves the folder through `media_month_dir(out_dir, dt,
+gallery)`. Deciding the home **once, up front** is deliberate — filing then moving would leave empty
+month dirs behind for gallery-only months. `find_local_media` searches BOTH the activity month dir and
+the `Gallery/` subtree, so the scrapbook resolves files in either home. Don't remove the Gallery-aware
+lookup or the download path and the scrapbook will disagree; keep `media_month_dir` as the single
+source of a file's folder.
+
 ## Security / privacy
 
 - `feed.json` (and the `--debug` `debug_activities.json`) are passed through `scrub_signed_urls`
