@@ -70,7 +70,9 @@ source? The check just points you at the latest release / `git pull` instead.
   sign in/out, bathroom) are condensed into a compact "daily log" line per day. The scrapbook is
   titled with your child's name, with the class(es) they were in shown underneath (every class gets
   its own date range if they moved partway through). Click any photo to view it full-screen, and the
-  front page shows a summary (photos, videos, notes, date range, busiest month).
+  front page shows a summary (photos, videos, notes, date range, busiest month). When a teacher posts
+  several photos at once, they appear together in one entry under a single caption rather than repeating
+  the caption once per photo.
 
 ```
 procare_media/

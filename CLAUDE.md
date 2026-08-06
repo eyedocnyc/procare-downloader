@@ -151,6 +151,18 @@ photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use rea
   right below. The browser tab `<title>` (`title_full`) still includes the class name for context —
   only the big visible heading was the problem.
 
+**Multi-photo posts render as one card, not one per photo.** Procare represents a batch upload as one
+`photo_activity` record *per photo*, but stamps every record in the batch with the same `activity_time`,
+`comment` and `activity_type`. `scrapbook.group_records` collapses a day's content records by that exact
+key (`_group_key`), so a 12-photo post shows the caption once with all 12 photos in a `.media-grid` (CSS
+masonry). Verified against a real account: within any one `activity_time` the caption is always
+byte-identical, so the exact-match key never merges photos that don't belong together, and a caption
+reused on another day stays separate (different time). `render_card` therefore takes a **list** of
+records (the batch); the header/caption come from the first, the media from all. This is **render-only** —
+`feed.json` stays raw (one record per Procare activity), so the grouping can change without
+re-downloading and `--scrapbook-only` re-applies it. Don't push grouping into `feed.json`; the raw feed
+is the faithful archive.
+
 ## Security / privacy
 
 - `feed.json` (and the `--debug` `debug_activities.json`) are passed through `scrub_signed_urls`

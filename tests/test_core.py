@@ -486,6 +486,28 @@ def test_layout_multi_class_name_renders_intact():
     assert html.escape(multi_class) in land
     assert "Year in" not in land
 
+def test_scrapbook_groups_same_caption_batch():
+    # A multi-photo post is one photo_activity record per photo, all sharing an
+    # exact activity_time + caption. They should render as ONE card (caption shown
+    # once, all photos in a grid); a same-time post with a DIFFERENT caption stays
+    # its own card -- proving the caption is part of the batch key.
+    out = tempfile.mkdtemp(prefix="sb_group_")
+    batch = [photo_activity("k1", "2025-06-01", pid, caption="Hand Print Murals!")
+             for pid in ("p1", "p2", "p3")]          # same kid+date -> same activity_time
+    other = photo_activity("k1", "2025-06-01", "p9", caption="Snack time")  # same time, other text
+    recs = batch + [other]
+    for r in recs:
+        plant(sb.media_root(out), r)
+    sb.build_scrapbook(
+        [{"name": "Maya", "class_name": "Room", "folder": "", "records": recs}], out)
+    mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
+    html = open(os.path.join(out, "Scrapbook", mp), encoding="utf-8").read()
+    assert html.count("Hand Print Murals!") == 1        # caption deduped, shown once
+    assert html.count("Snack time") == 1
+    assert html.count('<div class="card">') == 2        # batch card + standalone card
+    assert html.count('class="media-grid"') == 1        # only the 3-photo batch gets a grid
+    assert html.count('<img class="media"') == 4        # all 3 batch photos + the standalone
+
 
 def test_layout_multi_child_isolated():
     out = tempfile.mkdtemp(prefix="sb_multi_")
