@@ -104,6 +104,7 @@ python procare_download.py --scrapbook
 | Option | What it does |
 |--------|--------------|
 | `--email` | Your Procare login email (asks if omitted) |
+| `--password-stdin` | Read the password from the first line of stdin instead of prompting, so the tool can run unattended (see below) |
 | `--out` | Output directory (default `procare_media`) |
 | `--scrapbook` | Build the HTML scrapbook after downloading |
 | `--scrapbook-only` | Rebuild the scrapbook without re-downloading (uses `feed.json`) |
@@ -117,6 +118,18 @@ python procare_download.py --scrapbook
 | `--debug` | Save one sample of each activity type to `debug_activities.json` |
 
 Running with **no arguments** (or double-clicking the app) starts a friendly guided menu.
+
+#### Unattended runs
+
+`--password-stdin` reads the password from stdin so nothing secret lands on the command line
+(where it would show up in `ps` and your shell history). Pipe it from a password manager:
+
+```bash
+op read "op://vault/Procare/password" | \
+  python procare_download.py --email you@example.com --password-stdin --scrapbook
+```
+
+Passing any argument already skips the guided menu, so this makes the whole run non-interactive.
 
 ---
 

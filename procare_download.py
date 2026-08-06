@@ -1323,6 +1323,10 @@ def build_parser():
     ap = argparse.ArgumentParser(description="Download all photos & videos from Procare, "
                                              "and optionally build a browsable scrapbook.")
     ap.add_argument("--email", help="Procare account email")
+    ap.add_argument("--password-stdin", dest="password_stdin", action="store_true",
+                    help="Read the password from the first line of stdin instead of "
+                         "prompting, for scripted/unattended runs (e.g. piping from a "
+                         "password manager). Keeps the secret off the command line.")
     ap.add_argument("--out", default="procare_media", help="Output directory (default: procare_media)")
     ap.add_argument("--since", help="Only include media on/after this date (YYYY-MM-DD)")
     ap.add_argument("--until", help="Only include media on/before this date (YYYY-MM-DD)")
@@ -1451,6 +1455,20 @@ def main():
             pass
 
 
+def read_password(args):
+    """Return the Procare password: from stdin (one line) with --password-stdin,
+    else an interactive hidden prompt.
+
+    --password-stdin enables scripted/unattended runs (e.g. `op read … | … `)
+    without the secret ever appearing on the command line."""
+    if getattr(args, "password_stdin", False):
+        line = sys.stdin.readline()
+        if not line:
+            sys.exit("--password-stdin was set but no password arrived on stdin.")
+        return line.rstrip("\n")
+    return getpass.getpass("Procare password (input hidden): ")
+
+
 def run(args):
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
@@ -1483,7 +1501,7 @@ def run(args):
     _warn_if_low_disk_space(out_dir)
 
     email = args.email or input("Procare email: ").strip()
-    password = getpass.getpass("Procare password (input hidden): ")
+    password = read_password(args)
 
     def parse_date(value, flag):
         if not value:
