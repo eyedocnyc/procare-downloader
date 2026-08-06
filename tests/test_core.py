@@ -53,9 +53,9 @@ def attend(kid, d, cls):
             "activiable": {"section": {"name": cls}}}
 
 
-def plant(media_dir, rec, ext=".jpg"):
+def plant(media_dir, rec, ext=".jpg", gallery=False):
     for _url, dt, ident, kind in pd.collect_media_entries(rec):
-        md = os.path.join(media_dir, dt.strftime("%Y-%m"))
+        md = pd.media_month_dir(media_dir, dt, gallery)
         os.makedirs(md, exist_ok=True)
         open(os.path.join(md, pd.media_stem(dt, kind, ident) + ext), "wb").write(b"\xff\xd8\xff\x00")
 
@@ -837,12 +837,42 @@ def test_download_summary_silent_when_something_found():
     assert "Nothing matched" not in buf.getvalue()
 
 # --------------------------------------------------------------------------- #
-# activity vs. gallery media filing
+# activity vs. gallery media filing, and metadata embedding
 # --------------------------------------------------------------------------- #
 def test_is_gallery_record():
     assert pd.is_gallery_record(pd.gallery_entry_to_record(
         "https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1), "g1", "photo", "k1"))
     assert not pd.is_gallery_record(photo_activity("k1", "2025-06-01", "p1"))
+
+
+def test_media_metadata_activity_vs_gallery():
+    # Activity: tagged with the child's name + an "activity" keyword; caption + staff kept.
+    act = photo_activity("k1", "2025-06-01", "p1", caption="first steps")
+    act["staff_present_name"] = "Ms. A"
+    m = pd.media_metadata(act, {"k1": "Maya"})
+    assert m["gallery"] is False and m["caption"] == "first steps" and m["creator"] == "Ms. A"
+    assert m["keywords"] == ["Maya", "activity"]
+    # Gallery: no person tag, no caption -> flagged untagged for review.
+    g = pd.gallery_entry_to_record("https://cdn/photos/files/g1/main/g1.jpg",
+                                   datetime(2025, 6, 1), "g1", "photo", "k1")
+    mg = pd.media_metadata(g, {"k1": "Maya"})
+    assert mg["gallery"] is True and mg["caption"] is None
+    assert mg["keywords"] == ["gallery", "untagged"]
+
+
+def test_exiftool_args_cover_exif_iptc_xmp():
+    args = pd._exiftool_args({"caption": "hi", "keywords": ["Maya", "activity"],
+                              "creator": "Ms. A"})
+    assert "-overwrite_original" in args
+    assert f"-XMP-xmp:CreatorTool={pd.META_TOOL_TAG}" in args
+    # Caption lands in all three homes.
+    assert "-EXIF:ImageDescription=hi" in args
+    assert "-IPTC:Caption-Abstract=hi" in args
+    assert "-XMP-dc:Description=hi" in args
+    # Every keyword is appended to both IPTC and XMP.
+    for kw in ("Maya", "activity"):
+        assert f"-IPTC:Keywords+={kw}" in args and f"-XMP-dc:Subject+={kw}" in args
+    assert "-EXIF:Artist=Ms. A" in args and "-XMP-dc:Creator=Ms. A" in args
 
 
 def test_find_local_media_looks_in_gallery_subtree():
@@ -879,6 +909,102 @@ def test_download_records_files_gallery_directly():
     finally:
         pd.save_media = orig
     assert flags == {"p1": False, "g1": True}
+def test_enrich_media_tags_all_and_is_idempotent():
+    out = tempfile.mkdtemp(prefix="pd_enrich_")
+    dt = datetime(2025, 6, 1, 10)
+    act = photo_activity("k1", "2025-06-01", "p1", caption="pic")
+    gal = pd.gallery_entry_to_record("https://cdn/photos/files/g1/main/g1.jpg", dt, "g1", "photo", "k1")
+    plant(out, act)
+    plant(out, gal, gallery=True)
+    # Record metadata calls instead of writing bytes (no exiftool/valid-image dependence).
+    calls = []
+    orig = pd.write_media_metadata
+
+    def fake_write(path, meta, dt=None):
+        calls.append(meta)
+        return True
+
+    pd.write_media_metadata = fake_write
+    try:
+        done = set()
+        pd.enrich_media([act, gal], out, {"k1": "Maya"}, done)
+        assert done == {pd.enriched_key(out, "photo", "p1"),
+                        pd.enriched_key(out, "photo", "g1")}
+        assert len(calls) == 2
+        # The gallery file is found in Gallery/ and tagged without a person keyword.
+        assert [c["keywords"] for c in calls if c["gallery"]] == [["gallery", "untagged"]]
+        # Re-running with the same `done` set is a no-op (nothing re-tagged).
+        pd.enrich_media([act, gal], out, {"k1": "Maya"}, done)
+        assert len(calls) == 2
+    finally:
+        pd.write_media_metadata = orig
+
+
+def test_enrich_media_tags_every_child_copy_of_the_same_photo():
+    """A photo tagged with two children is downloaded into BOTH children's
+    folders, so both copies need their own tags. Keyed on kind+ident alone, only
+    whichever copy the run reached first would ever be written -- and the marker
+    is persisted, so the other one would be skipped forever."""
+    out = tempfile.mkdtemp(prefix="pd_enrich_multi_")
+    act = photo_activity("k1", "2025-06-01", "p1", caption="pic")
+    maya, leo = os.path.join(out, "Maya"), os.path.join(out, "Leo")
+    plant(maya, act)
+    plant(leo, act)
+    written, orig = [], pd.write_media_metadata
+
+    def fake_write(path, meta, dt=None):
+        written.append(path)
+        return True
+
+    pd.write_media_metadata = fake_write
+    try:
+        done = set()
+        pd.enrich_media([act], maya, {"k1": "Maya"}, done)
+        pd.enrich_media([act], leo, {"k1": "Maya"}, done)
+    finally:
+        pd.write_media_metadata = orig
+    assert len(written) == 2, f"only one copy was tagged: {written}"
+    assert len({os.path.dirname(p) for p in written}) == 2
+
+
+def test_enrich_media_retries_a_write_that_failed():
+    """The `done` marker outlives the run, so writing one for a failed write
+    excludes that file from every later retry. Only a real write earns it."""
+    out = tempfile.mkdtemp(prefix="pd_enrich_fail_")
+    act = photo_activity("k1", "2025-06-01", "p1", caption="pic")
+    plant(out, act)
+    attempts, orig, results = [], pd.write_media_metadata, [False, True]
+
+    def fake_write(path, meta, dt=None):
+        attempts.append(path)
+        return results.pop(0)
+
+    pd.write_media_metadata = fake_write
+    try:
+        done = set()
+        pd.enrich_media([act], out, {"k1": "Maya"}, done)
+        assert not done, "a failed write must not be marked done"
+        pd.enrich_media([act], out, {"k1": "Maya"}, done)   # the retry
+        assert done == {pd.enriched_key(out, "photo", "p1")}
+    finally:
+        pd.write_media_metadata = orig
+    assert len(attempts) == 2, "the failed file was never retried"
+
+
+def test_write_media_metadata_reports_whether_it_wrote():
+    """It has to answer honestly: nothing to write is not a successful write."""
+    out = tempfile.mkdtemp(prefix="pd_meta_ret_")
+    path = os.path.join(out, "x.jpg")
+    open(path, "wb").write(b"\xff\xd8\xff\x00")
+    empty = {"caption": "", "keywords": [], "creator": "", "gallery": False}
+    assert pd.write_media_metadata(path, empty) is False
+
+
+def test_enriched_state_roundtrip():
+    p = os.path.join(tempfile.mkdtemp(prefix="pd_state_"), ".procare_enriched.json")
+    assert pd.load_enriched(p) == set()          # missing file -> empty
+    pd.save_enriched(p, {"photo:a", "video:b"})
+    assert pd.load_enriched(p) == {"photo:a", "video:b"}
 
 
 def test_read_password_from_stdin():
