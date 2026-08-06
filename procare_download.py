@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -45,6 +46,12 @@ try:
     HAVE_PIEXIF = True
 except ImportError:
     HAVE_PIEXIF = False  # photos still download; EXIF write is skipped with a warning
+
+# Optional dependency. When exiftool is on PATH we embed rich, standard metadata
+# (XMP + IPTC keywords/caption that Apple Photos, Lightroom and digiKam read, and
+# it handles videos too). Without it we fall back to EXIF-only via piexif (JPEG,
+# caption + date). Never required: the tool works either way.
+HAVE_EXIFTOOL = bool(shutil.which("exiftool"))
 
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
@@ -644,6 +651,150 @@ def apply_timestamp(path, dt):
 
 
 # --------------------------------------------------------------------------- #
+# Activity vs. gallery classification, and per-file metadata
+# --------------------------------------------------------------------------- #
+GALLERY_SUBDIR = "Gallery"            # untagged, account-wide media is filed here
+META_TOOL_TAG = "procare-downloader"  # CreatorTool marker written into each file
+
+
+def is_gallery_record(record):
+    """True if this record came from the account-wide gallery (no per-child tag).
+
+    `gallery_entry_to_record` names these with an id like `gallery-photo-<uuid>`;
+    everything else is a real activity-feed post tied to specific children."""
+    return str((record or {}).get("id") or "").startswith("gallery-")
+
+
+def media_metadata(record, kid_names):
+    """Describe one media item for embedding: caption, keywords, creator, source.
+
+    `kid_names` maps kid_id -> display name. Activity photos are tagged with the
+    child(ren) they belong to (from `kid_ids`) plus an "activity" keyword; gallery
+    photos carry no reliable person tag, so they get "gallery"/"untagged" instead
+    -- even folded into one child's folder, the gallery never says who is actually
+    in the frame."""
+    record = record or {}
+    if is_gallery_record(record):
+        return {"caption": None, "keywords": ["gallery", "untagged"],
+                "creator": None, "gallery": True}
+    names = [kid_names.get(str(k)) for k in (record.get("kid_ids") or [])]
+    data = record.get("data") or {}
+    return {"caption": (record.get("comment") or data.get("desc")) or None,
+            "keywords": [n for n in names if n] + ["activity"],
+            "creator": record.get("staff_present_name") or None, "gallery": False}
+
+
+def _exiftool_args(meta):
+    """Build the exiftool tag arguments (no file path) for one item's metadata.
+
+    Pure -> unit-tested. Writes each value into the EXIF, IPTC and XMP homes the
+    various photo apps read, so captions/keywords show up whatever browses them."""
+    args = ["-overwrite_original", "-codedcharacterset=utf8",
+            f"-XMP-xmp:CreatorTool={META_TOOL_TAG}"]
+    if meta.get("caption"):
+        for tag in ("-EXIF:ImageDescription=", "-IPTC:Caption-Abstract=", "-XMP-dc:Description="):
+            args.append(tag + meta["caption"])
+    for kw in meta.get("keywords") or []:
+        args.append(f"-IPTC:Keywords+={kw}")
+        args.append(f"-XMP-dc:Subject+={kw}")
+    if meta.get("creator"):
+        args.append(f"-EXIF:Artist={meta['creator']}")
+        args.append(f"-XMP-dc:Creator={meta['creator']}")
+    return args
+
+
+def _piexif_metadata(path, meta):
+    """EXIF-only fallback (JPEG) when exiftool isn't installed: caption + keywords
+    + artist into the fields piexif can reach. Weaker than XMP/IPTC (Apple Photos
+    won't filter on the Windows keyword tag) but keeps the data in-file."""
+    if os.path.splitext(path)[1].lower() not in (".jpg", ".jpeg") or not HAVE_PIEXIF:
+        return
+    try:
+        try:
+            exif = piexif.load(path)
+        except Exception:
+            exif = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+        exif.setdefault("0th", {})
+        if meta.get("caption"):
+            exif["0th"][piexif.ImageIFD.ImageDescription] = meta["caption"].encode("utf-8", "replace")
+        if meta.get("creator"):
+            exif["0th"][piexif.ImageIFD.Artist] = meta["creator"].encode("utf-8", "replace")
+        if meta.get("keywords"):
+            # XPKeywords is UTF-16LE, semicolon-separated (Windows convention).
+            exif["0th"][piexif.ImageIFD.XPKeywords] = ";".join(meta["keywords"]).encode("utf-16le")
+        exif["0th"][piexif.ImageIFD.Software] = META_TOOL_TAG.encode("ascii")
+        piexif.insert(piexif.dump(exif), path)
+    except Exception as e:
+        print(f"    (metadata write skipped: {e})")
+
+
+def write_media_metadata(path, meta, dt=None):
+    """Embed `meta` into the media file, then restore the capture mtime.
+
+    exiftool when available (full XMP/IPTC, photos and videos); otherwise the
+    piexif EXIF fallback. No-op when there's nothing to write."""
+    if not (meta.get("caption") or meta.get("keywords") or meta.get("creator")):
+        return
+    if HAVE_EXIFTOOL:
+        try:
+            subprocess.run(["exiftool", *_exiftool_args(meta), path],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception as e:
+            print(f"    (metadata write skipped: {e})")
+    else:
+        _piexif_metadata(path, meta)
+    # exiftool/piexif bump the file mtime; put the capture date back.
+    if dt is not None:
+        try:
+            os.utime(path, (dt.timestamp(), dt.timestamp()))
+        except (OSError, OverflowError, ValueError):
+            pass
+
+
+def enrich_media(records, media_root, kid_names, done):
+    """Second pass over a section's records: embed per-photo metadata.
+
+    `done` is a set of "kind:ident" keys (persisted across runs) so a resume never
+    re-tags a file it already handled. Works on whatever is on disk -- freshly
+    downloaded this run AND anything left from an earlier stop, so a resume
+    backfills older files without re-downloading them."""
+    tagged = 0
+    for rec in records:
+        meta = media_metadata(rec, kid_names)
+        for _url, dt, ident, kind in collect_media_entries(rec):
+            key = f"{kind}:{ident}"
+            if key in done:
+                continue
+            path = find_local_media(media_root, dt, kind, ident)
+            if not path:
+                continue
+            write_media_metadata(path, meta, dt)
+            tagged += 1
+            done.add(key)
+    if tagged:
+        note = "" if HAVE_EXIFTOOL else "  (EXIF-only: install exiftool for keyword filtering)"
+        print(f"  tagged {tagged} file(s){note}")
+
+
+def load_enriched(path):
+    """Load the set of already-enriched "kind:ident" keys (empty if none/broken)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return set(data) if isinstance(data, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def save_enriched(path, done):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sorted(done), f)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Saving + feed loops
 # --------------------------------------------------------------------------- #
 def media_stem(dt, label, ident):
@@ -652,24 +803,42 @@ def media_stem(dt, label, ident):
     return f"{dt.strftime('%Y-%m-%d_%H%M%S')}_{label}_{ident}"
 
 
+def media_month_dir(out_dir, dt, gallery=False):
+    """The folder a media item is saved into: the `Gallery/` subtree for untagged,
+    account-wide gallery media, the plain month folder otherwise. Shared by the
+    download path and `find_local_media` so a file's home is decided in one place."""
+    base = os.path.join(out_dir, GALLERY_SUBDIR) if gallery else out_dir
+    return os.path.join(base, dt.strftime("%Y-%m"))
+
+
 def find_local_media(out_dir, dt, label, ident):
-    """Return the path to an already-downloaded media file (any extension), or None."""
+    """Return the path to an already-downloaded media file (any extension), or None.
+
+    Looks in the activity month folder AND the `Gallery/` subtree, since untagged
+    gallery media is filed under `Gallery/<month>/` (see `media_month_dir`)."""
     ident = str(ident)
-    month_dir = os.path.join(out_dir, dt.strftime("%Y-%m"))
     stem = media_stem(dt, label, ident)
-    matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
-               if not p.endswith(".part")]
-    if matches:
-        return matches[0]
-    # Fallback: the same label+ident in any month (the timestamp/month recorded
-    # at download time may differ slightly from the lookup), since ident is unique.
-    pat = os.path.join(glob.escape(out_dir), "*", f"*_{label}_{glob.escape(ident)}.*")
-    matches = [p for p in glob.glob(pat) if not p.endswith(".part")]
-    return matches[0] if matches else None
+    gallery_root = os.path.join(out_dir, GALLERY_SUBDIR)
+    # Fast path: the exact month folder in either the activity or the gallery tree.
+    for base in (out_dir, gallery_root):
+        month_dir = os.path.join(base, dt.strftime("%Y-%m"))
+        matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
+                   if not p.endswith(".part")]
+        if matches:
+            return matches[0]
+    # Fallback: same label+ident in any month of either tree (the recorded month
+    # may differ slightly from the lookup), since ident is unique.
+    for pat in (os.path.join(glob.escape(out_dir), "*", f"*_{label}_{glob.escape(ident)}.*"),
+                os.path.join(glob.escape(gallery_root), "*", f"*_{label}_{glob.escape(ident)}.*")):
+        matches = [p for p in glob.glob(pat) if not p.endswith(".part")]
+        if matches:
+            return matches[0]
+    return None
 
 
 def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
-               stats, default_ext, seen=None, overwrite=False, until_dt=None):
+               stats, default_ext, seen=None, overwrite=False, until_dt=None,
+               gallery=False):
     """Download one media item into its monthly folder and timestamp it.
 
     `session` is the authenticated Procare session; `media_session` is the
@@ -696,7 +865,7 @@ def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
         stats["skipped_exist"] += 1
         return
 
-    month_dir = os.path.join(out_dir, dt.strftime("%Y-%m"))
+    month_dir = media_month_dir(out_dir, dt, gallery)
     os.makedirs(month_dir, exist_ok=True)
     stem = media_stem(dt, label, ident)
 
@@ -1283,13 +1452,14 @@ def download_records(session, media_session, records, out_dir, since_dt, until_d
     """Download the photos/videos attached to the given activity records."""
     total = len(records)
     for idx, it in enumerate(records):
+        gallery = is_gallery_record(it)
         for media_url, dt, ident, kind in collect_media_entries(it):
             if kinds_filter and kind not in kinds_filter:
                 continue
             default_ext = ".mp4" if kind == "video" else ".jpg"
             save_media(session, media_session, media_url, dt, kind, ident, out_dir,
                        since_dt, stats, default_ext, seen=seen, overwrite=overwrite,
-                       until_dt=until_dt)
+                       until_dt=until_dt, gallery=gallery)
         if total and (idx + 1) % 200 == 0:
             print(f"  ...scanned {idx + 1}/{total} activities "
                   f"(downloaded {stats['downloaded']}, skipped {stats['skipped_exist']})")
@@ -1612,6 +1782,12 @@ def run(args):
 
     if download:
         kinds_filter = {"video"} if args.videos_only else None
+        # kid_id -> first name, for the person keyword written into each photo.
+        kid_names = {str(k["id"]): scrapbook.first_name(k) for k in kids_meta if k.get("id")}
+        # Remember what's already been tagged so a resume backfills only new files
+        # (and re-tags everything on --overwrite).
+        enriched_path = os.path.join(out_dir, ".procare_enriched.json")
+        done = set() if args.overwrite else load_enriched(enriched_path)
         for s in sections:
             m_dir = scrapbook.media_root(out_dir, s["folder"])
             os.makedirs(m_dir, exist_ok=True)
@@ -1623,6 +1799,10 @@ def run(args):
             download_records(session, media_session, s["records"], m_dir, s["since"],
                              s["until"], stats, seen=set(), overwrite=args.overwrite,
                              kinds_filter=kinds_filter)
+            # Tag this section's files (new ones this run AND any left on disk
+            # from an earlier stop, so a resume backfills without re-downloading).
+            enrich_media(s["records"], m_dir, kid_names, done)
+        save_enriched(enriched_path, done)
         ranged = any(s["since"] or s["until"] for s in sections)
         _print_download_summary(stats, out_dir, ranged)
 

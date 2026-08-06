@@ -52,9 +52,9 @@ def attend(kid, d, cls):
             "activiable": {"section": {"name": cls}}}
 
 
-def plant(media_dir, rec, ext=".jpg"):
+def plant(media_dir, rec, ext=".jpg", gallery=False):
     for url, dt, ident, kind in pd.collect_media_entries(rec):
-        md = os.path.join(media_dir, dt.strftime("%Y-%m"))
+        md = pd.media_month_dir(media_dir, dt, gallery)
         os.makedirs(md, exist_ok=True)
         open(os.path.join(md, pd.media_stem(dt, kind, ident) + ext), "wb").write(b"\xff\xd8\xff\x00")
 
@@ -820,6 +820,110 @@ def test_download_summary_silent_when_something_found():
     with redirect_stdout(buf):
         pd._print_download_summary(stats, "/out", ranged=False)
     assert "Nothing matched" not in buf.getvalue()
+
+# --------------------------------------------------------------------------- #
+# activity vs. gallery media filing, and metadata embedding
+# --------------------------------------------------------------------------- #
+def test_is_gallery_record():
+    assert pd.is_gallery_record(pd.gallery_entry_to_record(
+        "https://cdn/photos/files/g1/main/g1.jpg", datetime(2025, 6, 1), "g1", "photo", "k1"))
+    assert not pd.is_gallery_record(photo_activity("k1", "2025-06-01", "p1"))
+
+
+def test_media_metadata_activity_vs_gallery():
+    # Activity: tagged with the child's name + an "activity" keyword; caption + staff kept.
+    act = photo_activity("k1", "2025-06-01", "p1", caption="first steps")
+    act["staff_present_name"] = "Ms. A"
+    m = pd.media_metadata(act, {"k1": "Maya"})
+    assert m["gallery"] is False and m["caption"] == "first steps" and m["creator"] == "Ms. A"
+    assert m["keywords"] == ["Maya", "activity"]
+    # Gallery: no person tag, no caption -> flagged untagged for review.
+    g = pd.gallery_entry_to_record("https://cdn/photos/files/g1/main/g1.jpg",
+                                   datetime(2025, 6, 1), "g1", "photo", "k1")
+    mg = pd.media_metadata(g, {"k1": "Maya"})
+    assert mg["gallery"] is True and mg["caption"] is None
+    assert mg["keywords"] == ["gallery", "untagged"]
+
+
+def test_exiftool_args_cover_exif_iptc_xmp():
+    args = pd._exiftool_args({"caption": "hi", "keywords": ["Maya", "activity"],
+                              "creator": "Ms. A"})
+    assert "-overwrite_original" in args
+    assert f"-XMP-xmp:CreatorTool={pd.META_TOOL_TAG}" in args
+    # Caption lands in all three homes.
+    assert "-EXIF:ImageDescription=hi" in args
+    assert "-IPTC:Caption-Abstract=hi" in args
+    assert "-XMP-dc:Description=hi" in args
+    # Every keyword is appended to both IPTC and XMP.
+    for kw in ("Maya", "activity"):
+        assert f"-IPTC:Keywords+={kw}" in args and f"-XMP-dc:Subject+={kw}" in args
+    assert "-EXIF:Artist=Ms. A" in args and "-XMP-dc:Creator=Ms. A" in args
+
+
+def test_find_local_media_looks_in_gallery_subtree():
+    out = tempfile.mkdtemp(prefix="pd_gal_")
+    dt = datetime(2025, 6, 1, 10)
+    gdir = os.path.join(out, pd.GALLERY_SUBDIR, "2025-06")
+    os.makedirs(gdir)
+    open(os.path.join(gdir, pd.media_stem(dt, "photo", "g1") + ".jpg"), "wb").write(b"\xff\xd8\xff\x00")
+    found = pd.find_local_media(out, dt, "photo", "g1")
+    assert found and pd.GALLERY_SUBDIR in found
+
+
+def test_media_month_dir_routes_gallery():
+    dt = datetime(2025, 6, 1, 10)
+    assert pd.media_month_dir("/out", dt) == os.path.join("/out", "2025-06")
+    assert pd.media_month_dir("/out", dt, gallery=True) == os.path.join(
+        "/out", pd.GALLERY_SUBDIR, "2025-06")
+
+
+def test_download_records_files_gallery_directly():
+    # download_records tells save_media gallery=True for gallery records and False
+    # for activity records, so untagged media lands in Gallery/ at download time
+    # (no later move needed -- no empty month dir left behind).
+    dt = datetime(2025, 6, 1, 10)
+    act = photo_activity("k1", "2025-06-01", "p1")
+    gal = pd.gallery_entry_to_record(
+        "https://cdn/photos/files/g1/main/g1.jpg", dt, "g1", "photo", "k1")
+    flags = {}
+    orig = pd.save_media
+    pd.save_media = lambda *a, **k: flags.__setitem__(a[5], k.get("gallery"))
+    try:
+        stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
+        pd.download_records(None, None, [act, gal], "/out", None, None, stats)
+    finally:
+        pd.save_media = orig
+    assert flags == {"p1": False, "g1": True}
+def test_enrich_media_tags_all_and_is_idempotent():
+    out = tempfile.mkdtemp(prefix="pd_enrich_")
+    dt = datetime(2025, 6, 1, 10)
+    act = photo_activity("k1", "2025-06-01", "p1", caption="pic")
+    gal = pd.gallery_entry_to_record("https://cdn/photos/files/g1/main/g1.jpg", dt, "g1", "photo", "k1")
+    plant(out, act)
+    plant(out, gal, gallery=True)
+    # Record metadata calls instead of writing bytes (no exiftool/valid-image dependence).
+    calls = []
+    orig = pd.write_media_metadata
+    pd.write_media_metadata = lambda path, meta, dt=None: calls.append(meta)
+    try:
+        done = set()
+        pd.enrich_media([act, gal], out, {"k1": "Maya"}, done)
+        assert done == {"photo:p1", "photo:g1"}
+        assert len(calls) == 2
+        # The gallery file is found in Gallery/ and tagged without a person keyword.
+        assert [c["keywords"] for c in calls if c["gallery"]] == [["gallery", "untagged"]]
+        # Re-running with the same `done` set is a no-op (nothing re-tagged).
+        pd.enrich_media([act, gal], out, {"k1": "Maya"}, done)
+        assert len(calls) == 2
+    finally:
+        pd.write_media_metadata = orig
+
+
+def test_enriched_state_roundtrip():
+    p = os.path.join(tempfile.mkdtemp(prefix="pd_state_"), ".procare_enriched.json")
+    assert pd.load_enriched(p) == set()          # missing file -> empty
+    pd.save_enriched(p, {"photo:a", "video:b"})
+    assert pd.load_enriched(p) == {"photo:a", "video:b"}
 
 
 def main():
