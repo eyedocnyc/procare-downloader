@@ -195,6 +195,33 @@ source of a file's folder.
   (e.g. `op read … | … --password-stdin`). Empty stdin **exits** rather than logging in blank — a blank
   password would burn one of the few attempts before Procare locks the account. Never accept the
   password as a CLI flag instead; that would put it in `ps` output and shell history.
+- **Data-type selection is independent** (`select_data`): `--media` (photos/videos + scrapbook, the
+  historical pipeline), `--messages`, and `--all-data` (everything) each stand alone. **No data-type flag
+  → media** (backward compatible). In `run()`, messages archive first, then a bare `return` skips the media
+  pipeline when media isn't selected — so `--messages` alone does NOT re-walk the photo feed. Add new data
+  types here (documents, billing) as their own flag + a branch, and include them in `--all-data`.
+- **`--messages` (EXPERIMENTAL, `archive_messages`)** archives parent↔staff chat to `Messages/` (raw
+  `messages.json` + a best-effort `messages.html` + attachments); honors `--since`/`--until` (client-side
+  filter — the API's own date param is unverified). **Shape confirmed against a live account:** a
+  `parent/messages` item is `{id, sender:{name}, message (HTML body), posted_at, subject, message_type,
+  thread, kids[], attachments[]}`. Key gotchas: **`message_type` is the chat CHANNEL** — `parent_admin_com`
+  = **Office Chat**, `general` = **Classroom Chat** (`MESSAGE_TYPE_LABELS`/`message_category`). `thread` is
+  just the mailbox folder (always `"inbox"`), NOT a conversation id, and `parent/conversations` is empty —
+  these are standalone messages. A single default `parent/messages` pull returns the whole inbox, which
+  already holds BOTH the school's messages and the family's, so classification is by SENDER, not folder;
+  the date is `posted_at`. `message_attachment_urls` reads only `attachments` (never the sender/kid avatars) and
+  does **not** filter by extension — a school attaches PDFs far more often than videos, and an
+  image/video allowlist dropped every newsletter and permission slip silently. `sniff_ext` (which
+  knows PDFs) settles the type from the real bytes after the download.
+  Always writes the raw JSON first. **The transcript** (`render_messages_html`) is **newest-first**, grouped
+  by channel and **color-coded per channel** (`CATEGORY_STYLES`), with **family-sent messages in a distinct
+  blue "you / family" style** — `fetch_carers` (`parent/carers`) supplies the carer ids/names, `_is_from_us`
+  matches the sender by id or name. Bodies render via `_message_body_html`: text escaped, only http/https/
+  mailto `<a>` links + bare URLs kept as real clickable anchors (XSS-safe), all other tags stripped. Pure
+  helpers (`_list_from`/`message_fields`/`message_attachment_urls`/`_message_body_html`/`_is_from_us`/
+  `render_messages_html`) are unit-tested; the live fetches are not. Needs a login run (not
+  `--scrapbook-only`). **Unconfirmed:** the `parent/carers` shape and the attachment item shape — the
+  account this was built against links OUT to Forms/Zoom/Drive rather than hosting files.
 - **The guided-mode window stays open on failure too, not just success.** `main()` catches `SystemExit`
   (raised by `_fail_login`, bad `--since`/`--until`, etc.) and bare `Exception`, prints the message, and
   still runs the "Press Enter to close this window" pause — otherwise a double-clicked `.exe` flashes
