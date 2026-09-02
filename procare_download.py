@@ -1465,7 +1465,9 @@ def read_password(args):
         line = sys.stdin.readline()
         if not line:
             sys.exit("--password-stdin was set but no password arrived on stdin.")
-        return line.rstrip("\n")
+        # Accept either Unix or Windows pipe line endings without treating a
+        # trailing carriage return as part of the password.
+        return line.rstrip("\r\n")
     return getpass.getpass("Procare password (input hidden): ")
 
 

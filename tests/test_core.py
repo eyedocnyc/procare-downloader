@@ -832,6 +832,8 @@ def test_read_password_from_stdin():
     try:
         sys.stdin = io.StringIO("hunter2\n")
         assert pd.read_password(_Args()) == "hunter2"      # one line, newline stripped
+        sys.stdin = io.StringIO("hunter2\r\n")
+        assert pd.read_password(_Args()) == "hunter2"      # Windows PowerShell pipe
         sys.stdin = io.StringIO("")                        # nothing piped -> refuse
         try:
             pd.read_password(_Args())
