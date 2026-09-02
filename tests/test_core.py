@@ -893,6 +893,14 @@ def test_read_password_from_stdin():
         assert pd.read_password(_Args()) == "hunter2"      # one line, newline stripped
         sys.stdin = io.StringIO("hunter2\r\n")
         assert pd.read_password(_Args()) == "hunter2"      # Windows PowerShell pipe
+        for blank in ("\n", "\r\n"):
+            sys.stdin = io.StringIO(blank)                  # blank pipe -> refuse
+            try:
+                pd.read_password(_Args())
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected SystemExit for blank stdin")
         sys.stdin = io.StringIO("")                        # nothing piped -> refuse
         try:
             pd.read_password(_Args())
