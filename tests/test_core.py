@@ -881,6 +881,29 @@ def test_download_records_files_gallery_directly():
     assert flags == {"p1": False, "g1": True}
 
 
+def test_read_password_from_stdin():
+    import io
+
+    class _Args:
+        password_stdin = True
+
+    orig = sys.stdin
+    try:
+        sys.stdin = io.StringIO("hunter2\n")
+        assert pd.read_password(_Args()) == "hunter2"      # one line, newline stripped
+        sys.stdin = io.StringIO("hunter2\r\n")
+        assert pd.read_password(_Args()) == "hunter2"      # Windows PowerShell pipe
+        sys.stdin = io.StringIO("")                        # nothing piped -> refuse
+        try:
+            pd.read_password(_Args())
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("expected SystemExit on empty stdin")
+    finally:
+        sys.stdin = orig
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
