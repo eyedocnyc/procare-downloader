@@ -23,7 +23,8 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
 - `START HERE (Windows).bat` / `START HERE (Mac).command` — launchers for source users.
 - `.github/workflows/ci.yml` — PR/`main` CI: byte-compile + regression tests on Python 3.9 and 3.12.
 - `.github/workflows/build.yml` — release CI: builds Win + Mac apps, publishes a Release on tags only.
-- `tests/test_core.py` — self-contained regression tests (`python tests/test_core.py`, no pytest).
+- `tests/test_core.py` — regression tests; runs under pytest *and* standalone (`python tests/test_core.py`).
+- `pyproject.toml` — dev deps + ruff/pytest config. `requirements.txt` stays for the shipped path.
 - `docs/preview.png` + `docs/sample/` — README screenshot and its anonymized source.
 
 ## Procare API (reverse-engineered; no official public API)
@@ -222,9 +223,30 @@ most Windows 11 builds and not something to casually recommend.
   *browser* download; a download the app performs for its own self-update avoids that prompt (see the
   `updater.py` gotcha above).
 
+## Local development (uv)
+
+Optional — the shipped path is unchanged. `uv sync` builds a `.venv` with the runtime + dev deps:
+
+```
+uv run pytest          # regression tests
+uv run ruff check .    # lint
+uv run ruff format .   # format (NOT yet applied repo-wide -- don't reformat in a feature PR)
+uv run python procare_download.py --help
+```
+
+**Two dependency manifests on purpose.** `pyproject.toml` is the dev source of truth; `requirements.txt`
+is the *shipping* path — the `START HERE` launchers `pip install -r requirements.txt` on a plain system
+Python, and CI/PyInstaller use it too. Keep the runtime pins in sync; never delete `requirements.txt`.
+`uv.lock` is committed so the dev toolchain is reproducible. `requires-python = ">=3.9"` must match the
+CI matrix floor. `[project].version` is a `0.0.0` placeholder — nothing is built from this file
+(`package = false`), and `APP_VERSION` in `procare_download.py` stays the only real version.
+
+`tests/test_core.py` keeps its `if __name__ == "__main__": main()` runner so `python tests/test_core.py`
+still works with no dev deps — that's what `ci.yml` and `build.yml` invoke. Don't remove it.
+
 ## Testing
 
-`python tests/test_core.py` (also run in CI). Add a test when you touch media identity, poster/avatar
+`python tests/test_core.py` (also run in CI), or `uv run pytest` locally. Add a test when you touch media identity, poster/avatar
 suppression, full-res selection, date parsing, scope/class logic, the scrapbook folder layout, or the
 updater's version/asset/verify logic. (The actual binary swap is platform+process bound and isn't
 unit-tested — keep it behind the fail-safe fallback.)
