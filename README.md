@@ -77,7 +77,14 @@ procare_media/
   Open Scrapbook.html    <- open this (the only page at the top level)
   Scrapbook/             <- the month-by-month pages (+ styling, feed.json)
   Media/                 <- all photos & videos, organized by month (YYYY-MM/)
+    Gallery/             <- gallery photos/videos, which carry no "who's in it" tag
 ```
+
+**Why the separate `Gallery/` folder?** Photos posted as part of an activity are tagged by staff with
+which children are in them, so those are known to be your child. The gallery is account-wide and carries
+no such tag — in a shared room its photos may be of classmates. Keeping them apart means you can safely
+keep everything under the month folders and review `Gallery/` separately, instead of having to sort one
+mixed pile later.
 
 **Multiple classes/years?** When run interactively, the app lists the classes it finds (with date
 ranges) and lets you pick one — handy for making a scrapbook for a single class or school year.
