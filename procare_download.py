@@ -28,6 +28,7 @@ import glob
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -139,6 +140,30 @@ AUTH_REJECTED_CODES = (401, 403, 422)
 REQUEST_TIMEOUT = 60
 RETRIES = 4
 POLITE_DELAY = 0.25  # seconds between requests, to be gentle on the API
+
+# Procare rate-limits a parent account that reads quickly for a while, and it does
+# so SILENTLY: the endpoint keeps answering HTTP 200 but every list comes back
+# empty. A walk that treats "empty page" as "end of data" therefore stops early
+# and reports success while having archived only a fraction of the media (this is
+# exactly how ~6,500 photos were missed). The gallery endpoints return a `total`
+# alongside each page, so the walk can tell "there is genuinely nothing here"
+# (total == 0) from "we were cut off mid-way" (collected < total) and wait.
+#
+# The response to being throttled is to slow down and wait, not to disguise the
+# client: requests are paced with human-scale jitter, one connection, no
+# parallelism, and a long backoff whenever the server signals it has had enough.
+PACING_JITTER = 0.6        # +/- fraction applied to every inter-request sleep
+GENTLE_DELAY = 4.0         # --gentle: seconds between requests
+GENTLE_JITTER = 0.75       # --gentle: wider spread, so the timing isn't a metronome
+THROTTLE_BACKOFF = (30, 60, 120, 240, 480, 900)  # seconds to wait, escalating
+THROTTLE_MAX_WAIT = 3600   # give up on a window after this much total waiting
+
+
+def polite_sleep(seconds=POLITE_DELAY):
+    """Sleep `seconds` with jitter, so a long walk doesn't hit the API on a
+    perfectly regular clock (steady machine-gun timing is both ruder and more
+    likely to trip a rate limiter than the same average rate spread unevenly)."""
+    time.sleep(max(0.0, seconds * (1.0 + random.uniform(-PACING_JITTER, PACING_JITTER))))
 
 
 # --------------------------------------------------------------------------- #
@@ -838,29 +863,120 @@ def _gallery_items_to_entries(items, kind):
     return out
 
 
-def _paginate_gallery(session, base, path, kind, base_params, reauth=None):
-    """Page through one gallery query (a fixed `base_params` plus an incrementing
-    `page`) and return its entries. Stops on an empty page, an error, the
-    GALLERY_MAX_PAGES cap, or a page that repeats the previous one's items — the
-    last two guard against a backend that ignores `page` and would otherwise loop
-    forever."""
-    entries, prev_ids = [], None
-    for page in range(1, GALLERY_MAX_PAGES + 1):
+# Windows the gallery walk could not finish (rate-limited): (month, kind, got, total).
+# Surfaced at the end of the run so a partial archive is never reported as complete.
+gallery_shortfalls = []
+
+
+def _gallery_total(payload):
+    """The server's own count of rows matching this query, or None if it didn't
+    say. This is what lets the walk tell an empty window from a throttled one."""
+    if isinstance(payload, dict):
+        total = payload.get("total")
+        if isinstance(total, int):
+            return total
+    return None
+
+
+def _gallery_canary(session, base, kid_id, start_date, end_date, reauth=None):
+    """Ask the gallery for ONE page covering the whole date range and return its
+    `total`, or None if the request failed.
+
+    This is the throttle detector. Procare's rate limiting doesn't just blank the
+    rows -- it reports `total: 0` as well, so a throttled window is byte-for-byte
+    indistinguishable from an empty one when you only look at that window. A
+    window that covers the ENTIRE history is the disambiguator: if the account has
+    any gallery media at all, this must come back positive. Zero here means the
+    account is being rate-limited (or the gallery really is empty, which the
+    caller establishes once, up front, before any heavy reading)."""
+    params = gallery_query_params("photo", start_date.isoformat(), end_date.isoformat(),
+                                  kid_id, 1)
+    payload = fetch_json(session, base + GALLERY_PHOTO_PATH, params, "gallery canary",
+                         reauth=reauth, quiet=True, retries=2)
+    if payload is None:
+        return None
+    total = _gallery_total(payload)
+    if total:
+        return total
+    params = gallery_query_params("video", start_date.isoformat(), end_date.isoformat(),
+                                  kid_id, 1)
+    payload = fetch_json(session, base + VIDEO_PATH, params, "gallery canary",
+                         reauth=reauth, quiet=True, retries=2)
+    return _gallery_total(payload) if payload is not None else None
+
+
+def _wait_out_throttle(session, base, kid_id, start_date, end_date, reauth=None):
+    """Block until the gallery starts answering with rows again. Returns True if
+    it recovered, False if it stayed silent past THROTTLE_MAX_WAIT."""
+    waited = 0
+    for step in range(len(THROTTLE_BACKOFF) * 4):
+        delay = THROTTLE_BACKOFF[min(step, len(THROTTLE_BACKOFF) - 1)]
+        if waited + delay > THROTTLE_MAX_WAIT:
+            return False
+        print(f"\n  Rate-limited by Procare. Waiting {delay}s before trying again "
+              f"({waited + delay}s so far)...")
+        time.sleep(delay)
+        waited += delay
+        if _gallery_canary(session, base, kid_id, start_date, end_date, reauth):
+            print("  Rate limit lifted — resuming.")
+            return True
+    return False
+
+
+def _paginate_gallery(session, base, path, kind, base_params, reauth=None, report=None):
+    """Page through one gallery query and return (entries, total, complete).
+
+    Procare throttles a busy account by answering HTTP 200 with an EMPTY list
+    instead of an error, so "no items" is ambiguous. Each response carries a
+    `total`, so we page until we have seen `total` rows rather than until a page
+    comes back empty. A short/empty page while rows are still outstanding means we
+    were cut off: wait (escalating `THROTTLE_BACKOFF`) and retry the SAME page,
+    up to `THROTTLE_MAX_WAIT`. `complete` is False if we gave up short, so the
+    caller can report the gap instead of silently claiming success.
+
+    Stops early on an error, the GALLERY_MAX_PAGES cap, or a page that repeats the
+    previous one's items (a backend ignoring `page`)."""
+    entries, prev_ids, seen_ids = [], None, set()
+    total, waited, backoff_at = None, 0, 0
+    page = 1
+    while page <= GALLERY_MAX_PAGES:
         params = dict(base_params, page=page)
         payload = fetch_json(session, base + path, params, path,
                              reauth=reauth, quiet=True, retries=GALLERY_RETRIES)
         if payload is None:
-            break
+            return entries, total, False
+        if total is None:
+            total = _gallery_total(payload)
         items = extract_items(payload)
+
         if not items:
-            break
+            # Genuinely empty window, or everything already collected -> done.
+            if not total or len(seen_ids) >= total:
+                return entries, total, True
+            # Rows outstanding but the server sent none: throttled. Wait, retry.
+            if waited >= THROTTLE_MAX_WAIT:
+                return entries, total, False
+            delay = THROTTLE_BACKOFF[min(backoff_at, len(THROTTLE_BACKOFF) - 1)]
+            backoff_at += 1
+            waited += delay
+            if report:
+                report(f"rate-limited with {len(seen_ids)}/{total} fetched — "
+                       f"waiting {delay}s before retrying page {page}")
+            time.sleep(delay)
+            continue
+
+        backoff_at = 0                       # a real page: reset the backoff ramp
         page_ids = [it.get("id") for it in items if isinstance(it, dict)]
-        if page_ids and page_ids == prev_ids:   # endpoint ignoring `page` -> stop
-            break
+        if page_ids and page_ids == prev_ids:      # endpoint ignoring `page`
+            return entries, total, True
         prev_ids = page_ids
+        seen_ids.update(i for i in page_ids if i is not None)
         entries.extend(_gallery_items_to_entries(items, kind))
-        time.sleep(POLITE_DELAY)
-    return entries
+        if total and len(seen_ids) >= total:
+            return entries, total, True
+        page += 1
+        polite_sleep()
+    return entries, total, total is None or len(seen_ids) >= total
 
 
 def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None, progress=None):
@@ -883,15 +999,48 @@ def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None
     entries = []
     kid_params = {"kid_id": kid_id} if kid_id else {}
     windows = list(month_windows(start_date, end_date))
+
+    # Establish ONCE, before reading anything heavy, whether this account has
+    # gallery media at all. Everything after this can then read a `total: 0`
+    # window as "we got rate-limited" rather than "there is nothing here" -- the
+    # distinction that decides between waiting and silently archiving nothing.
+    have_media = _gallery_canary(session, base, kid_id, start_date, end_date, reauth)
+    if have_media == 0:
+        print("  (the gallery reports no media in this range for this child)")
     for kind, path, resource in GALLERY_ENDPOINTS:
         if progress:
             progress(None)                        # the unfiltered pass
-        entries.extend(_paginate_gallery(session, base, path, kind, dict(kid_params), reauth))
+        got, _total, _ok = _paginate_gallery(session, base, path, kind,
+                                             dict(kid_params), reauth)
+        entries.extend(got)
         for win_from, win_to in windows:
             if progress:
                 progress(win_from[:7])            # YYYY-MM label for this window
             base_params = gallery_query_params(resource, win_from, win_to, kid_id)
-            entries.extend(_paginate_gallery(session, base, path, kind, base_params, reauth))
+
+            def note(msg, _w=win_from[:7], _k=kind):
+                sys.stdout.write(f"\r  Gallery {_w} {_k}s: {msg}\n")
+                sys.stdout.flush()
+
+            got, total, ok = _paginate_gallery(session, base, path, kind,
+                                               base_params, reauth, report=note)
+            # Empty window on an account we KNOW has gallery media: check whether
+            # we are being throttled, and if so wait it out and redo this window
+            # rather than moving on and losing it silently.
+            throttled = (not got and have_media
+                         and not _gallery_canary(session, base, kid_id,
+                                                 start_date, end_date, reauth))
+            if throttled:
+                if _wait_out_throttle(session, base, kid_id, start_date, end_date, reauth):
+                    got, total, ok = _paginate_gallery(
+                        session, base, path, kind, base_params, reauth, report=note)
+                else:
+                    ok = False
+            entries.extend(got)
+            if not ok:
+                # Never let a throttled window look like an empty one.
+                gallery_shortfalls.append((win_from[:7], kind, len(got), total))
+            polite_sleep()
     return entries
 
 
@@ -1382,6 +1531,11 @@ def build_parser():
                          "(auto-detected from the feed if omitted)")
     ap.add_argument("--version", action="version", version=f"Procare Downloader v{APP_VERSION}",
                     help="Print the version and exit")
+    ap.add_argument("--gentle", action="store_true",
+                    help="Read at a slow, human pace (several seconds between requests "
+                         "instead of a fraction of one). Much less likely to trip "
+                         "Procare's rate limiter on a large archive; use it if a normal "
+                         "run reports rate-limited windows.")
     ap.add_argument("--no-update-check", action="store_true",
                     help="Don't check GitHub for a newer version on startup")
     return ap
@@ -1553,6 +1707,14 @@ def run(args):
     if until_dt:  # make --until inclusive of the whole day
         until_dt = until_dt.replace(hour=23, minute=59, second=59)
     interactive = getattr(args, "_interactive", False)
+
+    if getattr(args, "gentle", False):
+        # Pace like a person browsing, not a script: seconds between requests, and
+        # a wider jitter band so the timing isn't a metronome. Slower by design --
+        # the fastest way to finish a big archive is not to get rate-limited.
+        global POLITE_DELAY, PACING_JITTER
+        POLITE_DELAY, PACING_JITTER = GENTLE_DELAY, GENTLE_JITTER
+        print("Gentle mode: reading slowly to stay under Procare's rate limit.\n")
 
     if not HAVE_PIEXIF:
         print("Note: 'piexif' not installed — photos will download but EXIF dates won't be "
@@ -1726,6 +1888,15 @@ def _print_download_summary(stats, out_dir, ranged):
     if nothing_found:
         print("\nNothing matched that selection. If this doesn't look right, try")
         print("running again with 'Everything' or a wider date range.")
+    if gallery_shortfalls:
+        # A rate-limited window is NOT an empty one. Say so loudly: the whole point
+        # of tracking `total` is that a partial archive must never look complete.
+        print("\n  !! INCOMPLETE — Procare rate-limited these gallery windows, so")
+        print("     some media was NOT downloaded:")
+        for month, kind, got, total in gallery_shortfalls:
+            print(f"       {month}  {kind}s: got {got} of {total if total is not None else '?'}")
+        print("     Wait a while (rate limits lift on their own) and re-run the same")
+        print("     command — finished files are skipped, so it resumes where it left off.")
 
 
 if __name__ == "__main__":

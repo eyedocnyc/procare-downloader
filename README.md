@@ -130,9 +130,27 @@ uv run ruff check .
 | `--until YYYY-MM-DD` | Only include media on/before this date |
 | `--overwrite` | Re-download files that already exist |
 | `--videos-only` | Only process videos |
+| `--gentle` | Read at a slower, more human pace — use it if Procare keeps rate-limiting you |
 | `--debug` | Save one sample of each activity type to `debug_activities.json` |
 
 Running with **no arguments** (or double-clicking the app) starts a friendly guided menu.
+
+### If a download says INCOMPLETE
+
+Procare limits how fast an account can read, and it does it **silently** — it keeps answering
+normally but sends back empty lists, with no error and no "429". A download that trusted those
+answers would stop early and tell you it had finished.
+
+So the download now counts: each month is read until it has as many items as Procare says that
+month holds. Anything it could not finish is listed at the end:
+
+```
+  !! INCOMPLETE — 2025-03 photos: got 40 of 500
+```
+
+That is not a failure, it is the tool refusing to call a partial archive complete. **Run the same
+command again** — finished files and finished months are skipped, so a repair run takes minutes.
+If it keeps happening, add `--gentle`, which reads at a several-second pace instead of racing.
 
 #### Unattended runs
 

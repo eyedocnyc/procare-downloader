@@ -334,8 +334,9 @@ def test_paginate_gallery_stops_on_repeated_page():
     pd.fetch_json = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), same_page)[1]
     pd.time.sleep = lambda *a, **k: None       # don't actually wait between pages
     try:
-        out = pd._paginate_gallery(None, "https://api-school.procareconnect.com/api/web/",
-                                   pd.GALLERY_PHOTO_PATH, "photo", {"kid_id": "k1"})
+        out, _total, _ok = pd._paginate_gallery(
+            None, "https://api-school.procareconnect.com/api/web/",
+            pd.GALLERY_PHOTO_PATH, "photo", {"kid_id": "k1"})
     finally:
         pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
     assert len(out) == 1                       # only the first page's item is kept
@@ -349,11 +350,136 @@ def test_paginate_gallery_respects_max_pages():
         {"id": f"p{a[2]['page']}", "main_url": f"https://cdn/photos/files/x{a[2]['page']}/main/x.jpg"}]}
     pd.time.sleep = lambda *a, **k: None
     try:
-        out = pd._paginate_gallery(None, "https://api-school.procareconnect.com/api/web/",
-                                   pd.GALLERY_PHOTO_PATH, "photo", {})
+        out, _total, _ok = pd._paginate_gallery(
+            None, "https://api-school.procareconnect.com/api/web/",
+            pd.GALLERY_PHOTO_PATH, "photo", {})
     finally:
         pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
     assert len(out) == pd.GALLERY_MAX_PAGES     # bounded, never infinite
+
+
+def _photo(i):
+    return {"id": f"p{i}", "main_url": f"https://cdn/photos/files/p{i}/main/p{i}.jpg"}
+
+
+def test_paginate_gallery_waits_out_a_silent_throttle():
+    # Procare answers 200-with-empty-list when it rate-limits. With rows still
+    # outstanding (total=3) that must NOT be read as "end of data": the walk waits
+    # and retries the same page, and ends up with everything.
+    pages = [{"total": 3, "photos": [_photo(1), _photo(2)]},   # page 1
+             {"total": 3, "photos": []},                        # page 2 - throttled
+             {"total": 3, "photos": [_photo(3)]},               # page 2 - retried
+             {"total": 3, "photos": []}]                        # page 3 - genuinely done
+    orig_fj, orig_sleep = pd.fetch_json, pd.time.sleep
+    pd.fetch_json = lambda *a, **k: pages.pop(0) if pages else {"total": 3, "photos": []}
+    pd.time.sleep = lambda *a, **k: None
+    try:
+        out, total, ok = pd._paginate_gallery(
+            None, "https://api-school.procareconnect.com/api/web/",
+            pd.GALLERY_PHOTO_PATH, "photo", {})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
+    assert total == 3
+    assert len(out) == 3        # the throttled page was retried, not skipped
+    assert ok is True
+
+
+def test_paginate_gallery_reports_incomplete_when_throttle_never_lifts():
+    # Server says there are 500 rows but only ever hands back one page. The walk
+    # must give up eventually AND report complete=False, so the run can warn the
+    # user instead of claiming a full archive.
+    state = {"n": 0}
+
+    def fake(*a, **k):
+        state["n"] += 1
+        return {"total": 500, "photos": [_photo(1)]} if state["n"] == 1 else {"total": 500, "photos": []}
+
+    orig_fj, orig_sleep = pd.fetch_json, pd.time.sleep
+    pd.fetch_json, pd.time.sleep = fake, lambda *a, **k: None
+    try:
+        out, total, ok = pd._paginate_gallery(
+            None, "https://api-school.procareconnect.com/api/web/",
+            pd.GALLERY_PHOTO_PATH, "photo", {})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
+    assert total == 500
+    assert len(out) == 1
+    assert ok is False          # the caller must be told this window is short
+
+
+def test_paginate_gallery_empty_window_is_complete_not_throttled():
+    # total == 0 is a genuinely empty month; it must return immediately.
+    orig_fj, orig_sleep = pd.fetch_json, pd.time.sleep
+    pd.fetch_json = lambda *a, **k: {"total": 0, "photos": []}
+    pd.time.sleep = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not wait"))
+    try:
+        out, total, ok = pd._paginate_gallery(
+            None, "https://api-school.procareconnect.com/api/web/",
+            pd.GALLERY_PHOTO_PATH, "photo", {})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
+    assert (out, total, ok) == ([], 0, True)
+
+
+def test_polite_sleep_is_jittered_and_never_negative():
+    seen = []
+    orig = pd.time.sleep
+    pd.time.sleep = seen.append
+    try:
+        for _ in range(40):
+            pd.polite_sleep(1.0)
+    finally:
+        pd.time.sleep = orig
+    assert all(v >= 0 for v in seen)
+    assert len(set(seen)) > 1                 # actually varies, not a fixed clock
+    assert max(seen) <= 1.0 * (1 + pd.PACING_JITTER) + 1e-9
+
+
+def test_gallery_canary_distinguishes_empty_from_throttled():
+    # The canary asks over the WHOLE range. A positive total proves the account has
+    # gallery media, which is what lets a later `total: 0` window be read as
+    # "rate-limited" instead of "empty" -- Procare zeroes `total` when it throttles,
+    # so a single window can never tell the two apart on its own.
+    from datetime import date as _date
+    orig = pd.fetch_json
+    pd.fetch_json = lambda *a, **k: {"total": 1361, "photos": []}
+    try:
+        assert pd._gallery_canary(None, "https://api-school.procareconnect.com/api/web/",
+                                  "k1", _date(2024, 11, 1), _date(2025, 7, 31)) == 1361
+    finally:
+        pd.fetch_json = orig
+    # Throttled (or truly empty): photos AND videos both report zero.
+    pd.fetch_json = lambda *a, **k: {"total": 0, "photos": [], "videos": []}
+    try:
+        assert not pd._gallery_canary(None, "https://api-school.procareconnect.com/api/web/",
+                                      "k1", _date(2024, 11, 1), _date(2025, 7, 31))
+    finally:
+        pd.fetch_json = orig
+
+
+def test_gallery_canary_falls_back_to_videos():
+    # A gallery with no photos but some videos must still read as "has media",
+    # otherwise every window on that account would look throttled and the walk
+    # would wait forever.
+    from datetime import date as _date
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"total": 0, "photos": []} if calls["n"] == 1 else {"total": 7, "videos": []}
+
+    orig = pd.fetch_json
+    pd.fetch_json = fake
+    try:
+        assert pd._gallery_canary(None, "https://api-school.procareconnect.com/api/web/",
+                                  "k1", _date(2024, 11, 1), _date(2025, 7, 31)) == 7
+    finally:
+        pd.fetch_json = orig
+
+
+def test_gentle_constants_are_slower_than_default():
+    assert pd.GENTLE_DELAY > pd.POLITE_DELAY
+    assert pd.GENTLE_JITTER >= pd.PACING_JITTER
 
 
 def test_gallery_step_count_and_progress():
