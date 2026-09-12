@@ -65,6 +65,12 @@ source? The check just points you at the latest release / `git pull` instead.
 - **All photos and videos**, full resolution, organized into monthly folders.
 - **Correct dates:** photos keep their capture date in EXIF; every file's date is set to when it
   was taken, so they sort correctly in Photos, Google Photos, or your file browser.
+- **Searchable captions and names.** Each photo carries the teacher's caption, the posting staff
+  member, and the name(s) of the children staff tagged in it, embedded in the file itself. Apple
+  Photos, Lightroom and digiKam can then filter on them — handy for pulling out just your own child.
+  Install [exiftool](https://exiftool.org/) for the full set (works on videos too); without it a
+  smaller EXIF-only version is written to JPEGs. Gallery photos are marked `gallery`/`untagged`
+  instead, since the gallery never records who is in the picture.
 - **A scrapbook** — one HTML page per month plus a front page — showing each day's teacher notes
   and learning activities with the photos and videos embedded inline. Routine logs (meals, naps,
   sign in/out, bathroom) are condensed into a compact "daily log" line per day. The scrapbook is

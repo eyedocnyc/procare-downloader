@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -45,6 +46,12 @@ try:
     HAVE_PIEXIF = True
 except ImportError:
     HAVE_PIEXIF = False  # photos still download; EXIF write is skipped with a warning
+
+# Optional dependency. When exiftool is on PATH we embed rich, standard metadata
+# (XMP + IPTC keywords/caption that Apple Photos, Lightroom and digiKam read, and
+# it handles videos too). Without it we fall back to EXIF-only via piexif (JPEG,
+# caption + date). Never required: the tool works either way.
+HAVE_EXIFTOOL = bool(shutil.which("exiftool"))
 
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
@@ -643,9 +650,10 @@ def apply_timestamp(path, dt):
 
 
 # --------------------------------------------------------------------------- #
-# Activity vs. gallery classification
+# Activity vs. gallery classification, and per-file metadata
 # --------------------------------------------------------------------------- #
-GALLERY_SUBDIR = "Gallery"  # untagged, account-wide media is filed here
+GALLERY_SUBDIR = "Gallery"            # untagged, account-wide media is filed here
+META_TOOL_TAG = "procare-downloader"  # CreatorTool marker written into each file
 
 
 def is_gallery_record(record):
@@ -654,6 +662,161 @@ def is_gallery_record(record):
     `gallery_entry_to_record` names these with an id like `gallery-photo-<uuid>`;
     everything else is a real activity-feed post tied to specific children."""
     return str((record or {}).get("id") or "").startswith("gallery-")
+
+
+def media_metadata(record, kid_names):
+    """Describe one media item for embedding: caption, keywords, creator, source.
+
+    `kid_names` maps kid_id -> display name. Activity photos are tagged with the
+    child(ren) they belong to (from `kid_ids`) plus an "activity" keyword; gallery
+    photos carry no reliable person tag, so they get "gallery"/"untagged" instead
+    -- even folded into one child's folder, the gallery never says who is actually
+    in the frame."""
+    record = record or {}
+    if is_gallery_record(record):
+        return {"caption": None, "keywords": ["gallery", "untagged"],
+                "creator": None, "gallery": True}
+    names = [kid_names.get(str(k)) for k in (record.get("kid_ids") or [])]
+    data = record.get("data") or {}
+    return {"caption": (record.get("comment") or data.get("desc")) or None,
+            "keywords": [n for n in names if n] + ["activity"],
+            "creator": record.get("staff_present_name") or None, "gallery": False}
+
+
+def _exiftool_args(meta):
+    """Build the exiftool tag arguments (no file path) for one item's metadata.
+
+    Pure -> unit-tested. Writes each value into the EXIF, IPTC and XMP homes the
+    various photo apps read, so captions/keywords show up whatever browses them."""
+    args = ["-overwrite_original", "-codedcharacterset=utf8",
+            f"-XMP-xmp:CreatorTool={META_TOOL_TAG}"]
+    if meta.get("caption"):
+        for tag in ("-EXIF:ImageDescription=", "-IPTC:Caption-Abstract=", "-XMP-dc:Description="):
+            args.append(tag + meta["caption"])
+    for kw in meta.get("keywords") or []:
+        args.append(f"-IPTC:Keywords+={kw}")
+        args.append(f"-XMP-dc:Subject+={kw}")
+    if meta.get("creator"):
+        args.append(f"-EXIF:Artist={meta['creator']}")
+        args.append(f"-XMP-dc:Creator={meta['creator']}")
+    return args
+
+
+def _piexif_metadata(path, meta):
+    """EXIF-only fallback (JPEG) when exiftool isn't installed: caption + keywords
+    + artist into the fields piexif can reach. Weaker than XMP/IPTC (Apple Photos
+    won't filter on the Windows keyword tag) but keeps the data in-file.
+
+    Returns True only if the file was actually written."""
+    if os.path.splitext(path)[1].lower() not in (".jpg", ".jpeg") or not HAVE_PIEXIF:
+        return False
+    try:
+        try:
+            exif = piexif.load(path)
+        except Exception:
+            exif = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+        exif.setdefault("0th", {})
+        if meta.get("caption"):
+            exif["0th"][piexif.ImageIFD.ImageDescription] = meta["caption"].encode("utf-8", "replace")
+        if meta.get("creator"):
+            exif["0th"][piexif.ImageIFD.Artist] = meta["creator"].encode("utf-8", "replace")
+        if meta.get("keywords"):
+            # XPKeywords is UTF-16LE, semicolon-separated (Windows convention).
+            exif["0th"][piexif.ImageIFD.XPKeywords] = ";".join(meta["keywords"]).encode("utf-16le")
+        exif["0th"][piexif.ImageIFD.Software] = META_TOOL_TAG.encode("ascii")
+        piexif.insert(piexif.dump(exif), path)
+        return True
+    except Exception as e:
+        print(f"    (metadata write skipped: {e})")
+        return False
+
+
+def write_media_metadata(path, meta, dt=None):
+    """Embed `meta` into the media file, then restore the capture mtime.
+
+    exiftool when available (full XMP/IPTC, photos and videos); otherwise the
+    piexif EXIF fallback. No-op when there's nothing to write.
+
+    Returns True only when metadata actually reached the file. The caller
+    persists a "done" marker on the strength of that, and a marker written for a
+    failed or skipped write would exclude the file from every later retry --
+    permanently, since the marker outlives the run."""
+    if not (meta.get("caption") or meta.get("keywords") or meta.get("creator")):
+        return False
+    ok = False
+    if HAVE_EXIFTOOL:
+        try:
+            proc = subprocess.run(["exiftool", *_exiftool_args(meta), path],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  check=False)
+            ok = proc.returncode == 0
+        except Exception as e:
+            print(f"    (metadata write skipped: {e})")
+    else:
+        ok = _piexif_metadata(path, meta)
+    # exiftool/piexif bump the file mtime; put the capture date back.
+    if ok and dt is not None:
+        try:
+            os.utime(path, (dt.timestamp(), dt.timestamp()))
+        except (OSError, OverflowError, ValueError):
+            pass
+    return ok
+
+
+def enriched_key(media_root, kind, ident):
+    """Key for the persisted "already tagged" set.
+
+    The section folder is part of it because the SAME media can be filed under
+    more than one child -- an activity tagged with both of them, or a gallery item
+    -- and each copy is a separate file that needs its own tags. Keyed on
+    kind+ident alone, only whichever copy a run happened to reach first would ever
+    be written, and the marker would then skip the others forever."""
+    return f"{os.path.basename(media_root)}:{kind}:{ident}"
+
+
+def enrich_media(records, media_root, kid_names, done):
+    """Second pass over a section's records: embed per-photo metadata.
+
+    `done` is a set of `enriched_key` strings (persisted across runs) so a resume
+    never re-tags a file it already handled. Works on whatever is on disk --
+    freshly downloaded this run AND anything left from an earlier stop, so a
+    resume backfills older files without re-downloading them."""
+    tagged = 0
+    for rec in records:
+        meta = media_metadata(rec, kid_names)
+        for _url, dt, ident, kind in collect_media_entries(rec):
+            key = enriched_key(media_root, kind, ident)
+            if key in done:
+                continue
+            path = find_local_media(media_root, dt, kind, ident)
+            if not path:
+                continue
+            # Only a real write earns the marker: see write_media_metadata.
+            if not write_media_metadata(path, meta, dt):
+                continue
+            tagged += 1
+            done.add(key)
+    if tagged:
+        note = "" if HAVE_EXIFTOOL else "  (EXIF-only: install exiftool for keyword filtering)"
+        print(f"  tagged {tagged} file(s){note}")
+
+
+def load_enriched(path):
+    """Load the set of already-enriched "kind:ident" keys (empty if none/broken)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return set(data) if isinstance(data, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def save_enriched(path, done):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sorted(done), f)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1667,6 +1830,12 @@ def run(args):
 
     if download:
         kinds_filter = {"video"} if args.videos_only else None
+        # kid_id -> first name, for the person keyword written into each photo.
+        kid_names = {str(k["id"]): scrapbook.first_name(k) for k in kids_meta if k.get("id")}
+        # Remember what's already been tagged so a resume backfills only new files
+        # (and re-tags everything on --overwrite).
+        enriched_path = os.path.join(out_dir, ".procare_enriched.json")
+        done = set() if args.overwrite else load_enriched(enriched_path)
         for s in sections:
             m_dir = scrapbook.media_root(out_dir, s["folder"])
             os.makedirs(m_dir, exist_ok=True)
@@ -1678,6 +1847,10 @@ def run(args):
             download_records(session, media_session, s["records"], m_dir, s["since"],
                              s["until"], stats, seen=set(), overwrite=args.overwrite,
                              kinds_filter=kinds_filter)
+            # Tag this section's files (new ones this run AND any left on disk
+            # from an earlier stop, so a resume backfills without re-downloading).
+            enrich_media(s["records"], m_dir, kid_names, done)
+        save_enriched(enriched_path, done)
         ranged = any(s["since"] or s["until"] for s in sections)
         _print_download_summary(stats, out_dir, ranged)
 

@@ -179,6 +179,32 @@ records (the batch); the header/caption come from the first, the media from all.
 re-downloading and `--scrapbook-only` re-applies it. Don't push grouping into `feed.json`; the raw feed
 is the faithful archive.
 
+## Embedded photo metadata (`enrich_media`)
+
+After each section downloads, a second pass embeds per-photo metadata. It runs on whatever is on disk —
+new files this run AND files from an earlier stop — so a **resume backfills** existing photos without
+re-downloading. A persisted `<out>/.procare_enriched.json` set (`load_enriched`/`save_enriched`) makes
+it idempotent; `--overwrite` re-tags everything.
+- **The marker is per FILE, not per media item** (`enriched_key` = section folder + kind + ident). The
+  same photo can be filed under two children — an activity tagged with both, or a gallery item — and
+  each copy is a separate file needing its own tags. Keyed on `kind:ident` alone, only whichever copy
+  the run reached first was ever written.
+- **Only a real write earns a marker.** `write_media_metadata` (and `_piexif_metadata`) return a bool,
+  and `enrich_media` records the key only when it is True. The marker is persisted, so one written for
+  a failed or skipped write excludes that file from every later retry — permanently.
+
+- **Person tag = `kid_ids`** (a manual staff tag; Procare has no face recognition). `media_metadata`
+  writes, per activity photo, the child name(s) (via the `kid_id -> first_name` map) + an `activity`
+  keyword + the caption (`comment`/`data.desc`) + the posting staff as creator. **Gallery photos get
+  `gallery`/`untagged` and no person tag** — the gallery never says who is in frame. That difference is
+  the signal for "keep only photos of my child".
+- **exiftool is an OPTIONAL dependency** (`HAVE_EXIFTOOL`). When present, `write_media_metadata` embeds
+  full XMP + IPTC (the keywords/caption Apple Photos, Lightroom and digiKam filter on) for photos AND
+  videos. Without it, the piexif EXIF fallback writes caption + Windows keywords into JPEGs only (Apple
+  Photos won't filter those). Never required — the shipped app has no exiftool, so keep the fallback
+  working. `_exiftool_args` is pure (unit-tested); the subprocess/piexif writes aren't.
+- Both writers bump the file mtime, so the writer restores the capture-date mtime afterward.
+
 ## Security / privacy
 
 - `feed.json` (and the `--debug` `debug_activities.json`) are passed through `scrub_signed_urls`
