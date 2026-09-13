@@ -112,6 +112,35 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
   authenticity via **signed update manifests is the documented next step** if the threat model warrants
   it. `_swap_file` / `_windows_script` are pure so they're unit-tested; the `os.execv`/detached-`.bat`
   relaunch is process-bound and stays behind the fail-safe fallback.
+- **Procare rate-limits SILENTLY, and the walk must not mistake that for "no data".** A parent
+  account that reads quickly for a while starts getting HTTP **200 with an empty list** — no 429, no
+  error — and, critically, **`total` comes back `0` as well**. So a throttled window is byte-identical
+  to a genuinely empty one when you only look at that window, and the old "stop on the first empty
+  page" pagination ended a multi-year gallery walk after a few hundred rows while reporting success.
+  Three things guard against that now, and none of them should be removed:
+  1. `_paginate_gallery` pages until it has seen the response's own **`total`** rows, not until a page
+     is empty, and returns `(entries, total, complete)`. A short page with rows still outstanding is
+     treated as throttling: it waits (`THROTTLE_BACKOFF`) and retries **the same page**.
+  2. `_gallery_canary` asks for one page covering the **whole date range** before the heavy reading
+     starts. If the account has any gallery media this must be positive, so it is the only reliable way
+     to tell "empty account" from "rate-limited". `fetch_gallery_media` re-checks it whenever a window
+     comes back empty, and `_wait_out_throttle` blocks until it recovers.
+  3. Windows that still come up short land in `gallery_shortfalls` and are printed as a loud
+     **`!! INCOMPLETE`** block by `_print_download_summary`. A partial archive must never look complete.
+  `--gentle` (`GENTLE_DELAY`/`GENTLE_JITTER`) reads at a several-second human pace instead of 0.25s;
+  it is the fix for an account that keeps getting limited. All request pacing goes through
+  `polite_sleep()`, which jitters every delay — steady metronome timing is both ruder and likelier to
+  trip a limiter than the same average rate spread unevenly. The rate limit is a **server protection
+  mechanism**: the supported response is to slow down, back off and resume later. Do NOT "solve" it by
+  rotating IPs/proxies, forging multiple identities or parallelising harder.
+- **The activity feed only retains ~12 months; the gallery keeps everything.** Records age out of
+  `parent/daily_activities` (verified: a month that returned hundreds of records returned none at all
+  five weeks later) while the same photos stay reachable via `parent/photos`/`parent/videos` with date
+  filters. Two consequences: (a) a **re-run can return FEWER feed records than the last one**, so
+  overwriting `Scrapbook/feed.json` from a fresh walk silently drops the aged-out cards even though
+  their media is still on disk — the media/scrapbook mismatch shows up as files nothing links to;
+  (b) the gallery is the **only** route to media older than the retention window, so a media archive
+  that only follows the activity feed will be missing everything before it.
 - **Activities and gallery are two independent, overlapping sources.** Some daycares post everything as
   activities, some skip activities and upload straight to the gallery, and some do both for the same
   photo/video. We always fetch both: `fetch_all_records` (activity feed, correctly tagged per child via
