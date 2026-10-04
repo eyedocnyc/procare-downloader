@@ -923,6 +923,12 @@ def _wait_out_throttle(session, base, kid_id, start_date, end_date, reauth=None)
     return False
 
 
+def _gallery_complete(total, seen_ids):
+    """Whether a gallery walk that saw `seen_ids` holds every row the server
+    reported. An unknown `total` can't prove a shortfall, so it counts as complete."""
+    return total is None or len(seen_ids) >= total
+
+
 def _paginate_gallery(session, base, path, kind, base_params, reauth=None, report=None):
     """Page through one gallery query and return (entries, total, complete).
 
@@ -968,7 +974,9 @@ def _paginate_gallery(session, base, path, kind, base_params, reauth=None, repor
         backoff_at = 0                       # a real page: reset the backoff ramp
         page_ids = [it.get("id") for it in items if isinstance(it, dict)]
         if page_ids and page_ids == prev_ids:      # endpoint ignoring `page`
-            return entries, total, True
+            # We can't page any further, but that only makes the window complete
+            # if we already hold `total` rows; otherwise it is a shortfall.
+            return entries, total, _gallery_complete(total, seen_ids)
         prev_ids = page_ids
         seen_ids.update(i for i in page_ids if i is not None)
         entries.extend(_gallery_items_to_entries(items, kind))
@@ -976,7 +984,7 @@ def _paginate_gallery(session, base, path, kind, base_params, reauth=None, repor
             return entries, total, True
         page += 1
         polite_sleep()
-    return entries, total, total is None or len(seen_ids) >= total
+    return entries, total, _gallery_complete(total, seen_ids)
 
 
 def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None, progress=None):

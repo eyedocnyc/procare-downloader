@@ -334,13 +334,29 @@ def test_paginate_gallery_stops_on_repeated_page():
     pd.fetch_json = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), same_page)[1]
     pd.time.sleep = lambda *a, **k: None       # don't actually wait between pages
     try:
-        out, _total, _ok = pd._paginate_gallery(
+        out, total, ok = pd._paginate_gallery(
             None, "https://api-school.procareconnect.com/api/web/",
             pd.GALLERY_PHOTO_PATH, "photo", {"kid_id": "k1"})
     finally:
         pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
     assert len(out) == 1                       # only the first page's item is kept
     assert calls["n"] == 2                     # page 1, then page 2 detected as a repeat -> stop
+    assert total is None and ok is True        # no total to fall short of
+
+
+def test_paginate_gallery_repeated_page_short_of_total_is_incomplete():
+    # The server reports 500 rows but repeats page 1. Stopping is right; calling
+    # the window complete is not -- the caller would never record the shortfall.
+    page = {"total": 500, "photos": [_photo(1)]}
+    orig_fj, orig_sleep = pd.fetch_json, pd.time.sleep
+    pd.fetch_json, pd.time.sleep = (lambda *a, **k: page), (lambda *a, **k: None)
+    try:
+        out, total, ok = pd._paginate_gallery(
+            None, "https://api-school.procareconnect.com/api/web/",
+            pd.GALLERY_PHOTO_PATH, "photo", {})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig_fj, orig_sleep
+    assert (len(out), total, ok) == (1, 500, False)
 
 
 def test_paginate_gallery_respects_max_pages():
