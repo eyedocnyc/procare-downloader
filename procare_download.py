@@ -844,15 +844,18 @@ def find_local_media(out_dir, dt, label, ident):
     Looks in the activity month folder AND the `Gallery/` subtree, since untagged
     gallery media is filed under `Gallery/<month>/` (see `media_month_dir`)."""
     ident = str(ident)
-    stem = media_stem(dt, label, ident)
     gallery_root = os.path.join(out_dir, GALLERY_SUBDIR)
     # Fast path: the exact month folder in either the activity or the gallery tree.
-    for base in (out_dir, gallery_root):
-        month_dir = os.path.join(base, dt.strftime("%Y-%m"))
-        matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
-                   if not p.endswith(".part")]
-        if matches:
-            return matches[0]
+    # An undated item was saved under the downloading run's own clock, so its stem
+    # can't be rebuilt; only the label+ident fallback below can find it.
+    if dt is not None:
+        stem = media_stem(dt, label, ident)
+        for base in (out_dir, gallery_root):
+            month_dir = os.path.join(base, dt.strftime("%Y-%m"))
+            matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
+                       if not p.endswith(".part")]
+            if matches:
+                return matches[0]
     # Fallback: same label+ident in any month of either tree (the recorded month
     # may differ slightly from the lookup), since ident is unique.
     for pat in (os.path.join(glob.escape(out_dir), "*", f"*_{label}_{glob.escape(ident)}.*"),

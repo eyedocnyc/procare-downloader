@@ -624,6 +624,21 @@ def test_stable_media_ident_deterministic():
     assert a == b and a and a != "None" and len(a) == 20
 
 
+def test_find_local_media_handles_an_undated_item():
+    """An item with no date is saved under the run's own timestamp (the
+    downloader falls back to now()), so a later lookup can't rebuild its stem.
+    It must still be found by kind+ident -- and must never crash the caller,
+    which would abort the run before the feed and scrapbook are written."""
+    out = tempfile.mkdtemp(prefix="pd_nodate_")
+    assert pd.find_local_media(out, None, "photo", "p1") is None
+    saved = datetime(2026, 1, 2, 3, 4, 5)
+    md = os.path.join(out, saved.strftime("%Y-%m"))
+    os.makedirs(md)
+    path = os.path.join(md, pd.media_stem(saved, "photo", "p1") + ".jpg")
+    open(path, "wb").write(b"\xff\xd8\xff\x00")
+    assert pd.find_local_media(out, None, "photo", "p1") == path
+
+
 def test_idless_records_stay_distinct():
     # Two activities with no API id must not collapse into one dedup key.
     base = {"activity_type": "note_activity", "activity_time": "2025-06-01T09:00:00-04:00",
