@@ -181,7 +181,9 @@ def media_html(record, media_dir, pages_dir):
     `media_dir`; the link is relative to `pages_dir` (where the HTML page is)."""
     pieces = []
     for _url, dt, ident, kind in pd.collect_media_entries(record):
-        path = pd.find_local_media(media_dir, dt, kind, ident)
+        # An undated item was saved under the download date; datetime.min skips
+        # the month-folder fast path and finds it by its unique ident instead.
+        path = pd.find_local_media(media_dir, dt or datetime.min, kind, ident)
         if not path:
             pieces.append('<div class="missing">media file not found '
                           '(re-run the downloader to fetch it)</div>')
@@ -310,12 +312,21 @@ def page_shell(title, body, css_rel="assets/scrapbook.css"):
 </html>"""
 
 
+# Month key for records with no usable date: they get a page of their own,
+# listed last, rather than crashing the build or silently disappearing.
+UNDATED = "Undated"
+
+
 def month_label(mkey):
+    if mkey == UNDATED:
+        return UNDATED
     y, m = mkey.split("-")
     return f"{MONTH_NAMES[int(m)]} {y}"
 
 
 def month_filename(mkey, prefix=""):
+    if mkey == UNDATED:
+        return f"{prefix}{UNDATED}.html"
     return f"{prefix}{mkey} ({month_label(mkey)}).html"
 
 
@@ -403,7 +414,12 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
     by_month = OrderedDict()
     for r in sorted(records, key=lambda r: record_dt(r) or datetime.min):
         dk = day_key(r)
-        by_month.setdefault(dk[:7], OrderedDict()).setdefault(dk, []).append(r)
+        if dk == "unknown":
+            dk = UNDATED
+        mk = UNDATED if dk == UNDATED else dk[:7]
+        by_month.setdefault(mk, OrderedDict()).setdefault(dk, []).append(r)
+    if UNDATED in by_month:
+        by_month.move_to_end(UNDATED)
     months = list(by_month.keys())
 
     back_to_landing = rel_href(landing_path, pages_dir)

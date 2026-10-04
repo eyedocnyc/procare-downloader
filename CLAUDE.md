@@ -143,6 +143,8 @@ shared by the download path and the renderer so filenames always agree
 (`media_stem` / `find_local_media`). Landing pages show a summary (`stats_html`); every page includes a
 photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use real relative paths
 (`rel_href`).
+- **A record with no usable date goes on an `Undated` page, listed last** (`scrapbook.UNDATED`), never
+  dropped; its media is found by ident, since the downloader filed it under the download date.
 - **The landing page `<h1>` never assumes a duration.** `_build_section` used to render
   `"{who}'s Year in {class}"` and "A year of memories" — both wrong whenever the actual span is
   shorter than a year, or (since `detect_class_name`'s multi-class fix) `class_name` is really a list

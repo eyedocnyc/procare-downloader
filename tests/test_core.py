@@ -1198,6 +1198,37 @@ def test_message_attachment_urls_keeps_documents():
     assert pd.ext_from_url("https://cdn/msgs/files/n4/nosuffix", ".bin") == ".bin"
 
 
+def test_scrapbook_keeps_undated_records_in_their_own_bucket():
+    """A record with no usable date must neither crash the build nor vanish.
+
+    `day_key` returns "unknown" for it, which used to reach `month_label` as a
+    month key and abort the whole scrapbook."""
+    out = tempfile.mkdtemp(prefix="pd_undated_")
+    act = photo_activity("k1", "2025-01-08", "p1")
+    plant(out, act)
+    undated = {"activity_type": "note_activity", "id": "n1", "kid_ids": ["k1"],
+               "comment": "A note with no date"}
+    undated_photo = {"activity_type": "photo_activity", "id": "n2", "kid_ids": ["k1"],
+                     "activiable": {"id": "p9",
+                                    "main_url": "https://cdn/photos/files/p9/main/p9.jpg"}}
+    # The downloader files an undated item under the day it was fetched.
+    fetched = os.path.join(out, sb.MEDIA_DIR, "2026-10")
+    os.makedirs(fetched)
+    open(os.path.join(fetched, "2026-10-04_120000_photo_p9.jpg"), "w").close()
+    pages = sb.build_scrapbook([{"name": "Maya", "class_name": "", "folder": "",
+                                 "records": [undated, undated_photo, act]}], out)
+    assert pages == 2, "the undated records get a page of their own"
+    pages_dir = os.path.join(out, sb.PAGES_DIR)
+    undated_page = open(os.path.join(pages_dir, sb.month_filename(sb.UNDATED)),
+                        encoding="utf-8").read()
+    assert "A note with no date" in undated_page
+    assert "2026-10-04_120000_photo_p9.jpg" in undated_page, "undated media is still linked"
+    january = open(os.path.join(pages_dir, "2025-01 (January 2025).html"), encoding="utf-8").read()
+    assert "A note with no date" not in january
+    landing = open(os.path.join(out, "Open Scrapbook.html"), encoding="utf-8").read()
+    assert landing.index("January 2025") < landing.index(sb.UNDATED), "undated sorts last"
+
+
 def test_render_messages_html_channels_family_style_and_order():
     msgs = [{"message_type": "general", "sender": {"name": "Ms. A"}, "subject": "Older",
              "message": '<p>Visit <a href="https://x.test/a">link</a></p>',
