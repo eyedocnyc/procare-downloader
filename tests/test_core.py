@@ -530,13 +530,14 @@ def test_fetch_gallery_media_runs_unfiltered_and_windowed_passes():
     # for photos and videos, so neither kind of account regresses.
     from datetime import date as _date
     seen = []
-    orig = pd.fetch_json
+    orig = pd.fetch_json, pd.time.sleep
     pd.fetch_json = lambda *a, **k: seen.append(dict(a[2])) or None  # a[2] == params; end walk
+    pd.time.sleep = lambda *a, **k: None
     try:
         pd.fetch_gallery_media(None, "https://api-school.procareconnect.com/api/web/",
                                "k1", _date(2024, 8, 1), _date(2024, 9, 30))
     finally:
-        pd.fetch_json = orig
+        pd.fetch_json, pd.time.sleep = orig
     def has_filter(p, r):
         return f"filters[{r}][datetime_from]" in p
 
@@ -546,6 +547,199 @@ def test_fetch_gallery_media_runs_unfiltered_and_windowed_passes():
     # date-windowed pass: datetime filters present for both resources
     assert any(has_filter(p, "photo") for p in seen)
     assert any(has_filter(p, "video") for p in seen)
+
+
+GALLERY_BASE = "https://api-school.procareconnect.com/api/web/"
+
+
+class _FakeGallery:
+    """A scripted Procare gallery for walk tests: no network, no real sleeping.
+
+    `photos` is [(YYYY-MM-DD, id)]. The limiter behaves the way Procare's does:
+    while throttled, every list is empty AND `total` is 0. It switches on after
+    `throttle_after` requests (or at once with `throttled=True`); each long sleep
+    (a backoff, not the sub-second pacing) lets `lift_per_sleep` requests through."""
+
+    PAGE = 50
+
+    def __init__(self, photos=(), throttled=False, throttle_after=None, lift_per_sleep=0):
+        self.photos = sorted(photos)
+        self.throttled, self.throttle_after = throttled, throttle_after
+        self.lift_per_sleep, self.lift = lift_per_sleep, 0
+        self.requests, self.slept = [], []
+
+    def fetch(self, _session, url, params, *_a, **_k):
+        self.requests.append((url, dict(params)))
+        if self.throttle_after is not None and len(self.requests) > self.throttle_after:
+            self.throttled, self.throttle_after = True, None
+        kind = "video" if url.endswith("videos/") else "photo"
+        if self.throttled:
+            if self.lift <= 0:
+                return {"total": 0, kind + "s": []}
+            self.lift -= 1
+        frm = params.get(f"filters[{kind}][datetime_from]", "0000")[:10]
+        to = params.get(f"filters[{kind}][datetime_to]", "9999")[:10]
+        rows = [] if kind == "video" else [
+            {"id": i, "created_at": f"{d}T10:00:00",
+             "main_url": f"https://cdn/photos/files/{i}/main/{i}.jpg"}
+            for d, i in self.photos if frm <= d <= to]
+        page = params.get("page", 1)
+        return {"total": len(rows), kind + "s": rows[(page - 1) * self.PAGE:page * self.PAGE]}
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        if seconds >= pd.THROTTLE_BACKOFF[0]:
+            self.lift = self.lift_per_sleep
+
+    def waited(self):
+        return sum(s for s in self.slept if s >= pd.THROTTLE_BACKOFF[0])
+
+
+def _walk(fake, start, end, kid_ids=None):
+    """Run the gallery walk against `fake` (one child unless `kid_ids` is given);
+    returns (entry idents, shortfalls)."""
+    orig = pd.fetch_json, pd.time.sleep, list(pd.gallery_shortfalls)
+    pd.fetch_json, pd.time.sleep = fake.fetch, fake.sleep
+    del pd.gallery_shortfalls[:]
+    try:
+        with redirect_stdout(io.StringIO()):
+            if kid_ids is None:
+                idents = {e[2] for e in pd.fetch_gallery_media(None, GALLERY_BASE, "k1",
+                                                               start, end)}
+            else:
+                idents = {k[1] for k in pd.collect_gallery(None, GALLERY_BASE, kid_ids,
+                                                           start, end)}
+        return idents, list(pd.gallery_shortfalls)
+    finally:
+        pd.fetch_json, pd.time.sleep = orig[0], orig[1]
+        pd.gallery_shortfalls[:] = orig[2]
+
+
+def test_gallery_canary_asks_videos_when_photos_fail():
+    """Some accounts answer the photos endpoint with a 400. That must not switch
+    throttle detection off for good: ask videos, and say None only if both fail."""
+    from datetime import date as _date
+
+    def fake(_s, url, *_a, **_k):
+        return None if url.endswith(pd.GALLERY_PHOTO_PATH) else {"total": 7, "videos": []}
+
+    orig = pd.fetch_json
+    try:
+        pd.fetch_json = fake
+        assert pd._gallery_canary(None, GALLERY_BASE, "k1", _date(2022, 1, 1),
+                                  _date(2022, 12, 31)) == 7
+        pd.fetch_json = lambda *a, **k: None
+        assert pd._gallery_canary(None, GALLERY_BASE, "k1", _date(2022, 1, 1),
+                                  _date(2022, 12, 31)) is None
+    finally:
+        pd.fetch_json = orig
+
+
+def test_rethrottle_after_recovery_is_never_an_empty_month():
+    """The limiter lifts long enough for the canary, then bites again on the
+    re-read. That `total: 0` answer must not pass for an empty month."""
+    from datetime import date as _date
+
+    fake = _FakeGallery(photos=[("2025-01-10", "p1"), ("2025-01-11", "p2")],
+                        throttle_after=1, lift_per_sleep=1)
+    got, short = _walk(fake, _date(2025, 1, 1), _date(2025, 1, 31))
+    if not {"p1", "p2"} <= got:        # not recovered: then it must be reported
+        assert ("2025-01", "photo", 0, None) in short, short
+
+
+def test_a_throttled_read_followed_by_a_lifted_canary_is_read_again():
+    """The limiter can lift between a throttled read and the canary after it. One
+    positive canary therefore can't prove the read was real: read once more."""
+    from datetime import date as _date
+
+    window_reads = []
+    p1 = {"id": "p1", "created_at": "2025-01-10T10:00:00",
+          "main_url": "https://cdn/photos/files/p1/main/p1.jpg"}
+
+    def fake(_s, url, params, *_a, **_k):
+        frm = params.get("filters[photo][datetime_from]", "")[:10]
+        to = params.get("filters[photo][datetime_to]", "")[:10]
+        if (frm, to) == ("2025-01-01", "2025-02-28"):        # the whole-range canary
+            return {"total": 1, "photos": [p1]}
+        if (frm, to) == ("2025-01-01", "2025-01-31"):        # the January window
+            window_reads.append(1)
+            if len(window_reads) > 1:                        # first read: throttled
+                return {"total": 1, "photos": [p1]}
+        return {"total": 0, "photos": [], "videos": []}      # everything else is empty
+
+    orig = pd.fetch_json, pd.time.sleep, list(pd.gallery_shortfalls)
+    pd.fetch_json, pd.time.sleep = fake, (lambda *a, **k: None)
+    try:
+        with redirect_stdout(io.StringIO()):
+            got = pd.fetch_gallery_media(None, GALLERY_BASE, "k1", _date(2025, 1, 1),
+                                         _date(2025, 2, 28))
+    finally:
+        pd.fetch_json, pd.time.sleep = orig[0], orig[1]
+        pd.gallery_shortfalls[:] = orig[2]
+    assert {e[2] for e in got} == {"p1"}, "the window was taken as empty after one read"
+
+
+def test_empty_windows_without_a_positive_canary_are_not_reported():
+    """With the whole-range count reading zero, an empty month could be the
+    limiter or a genuinely empty gallery. Don't cry INCOMPLETE on an account
+    that may simply have no gallery media."""
+    from datetime import date as _date
+
+    fake = _FakeGallery(photos=[("2025-01-10", "p1")], throttled=True)
+    _got, short = _walk(fake, _date(2025, 1, 1), _date(2025, 2, 28))
+    assert not short, short
+
+
+def test_initial_zero_canary_is_rechecked_before_it_is_trusted():
+    """A canary taken while throttled reads 0; trusting it would make every
+    throttled month look empty. One short wait and a second look fixes that."""
+    from datetime import date as _date
+
+    fake = _FakeGallery(photos=[("2025-01-10", "p1"), ("2025-01-11", "p2")],
+                        throttled=True, lift_per_sleep=20)
+    got, short = _walk(fake, _date(2025, 1, 1), _date(2025, 1, 31))
+    assert {"p1", "p2"} <= got and not short, (got, short)
+
+
+def test_a_stuck_limiter_costs_one_wait_not_one_per_month():
+    """Once a wait-out has failed, waiting again for every later month just burns
+    hours (about 37 per child over two years). Later months go straight to short,
+    and say their total is unknown rather than "0 of 0"."""
+    from datetime import date as _date
+
+    photos = [(f"{2024 + m // 12}-{m % 12 + 1:02d}-10", f"p{m}") for m in range(24)]
+    fake = _FakeGallery(photos=photos, throttle_after=2)
+    _got, short = _walk(fake, _date(2024, 1, 1), _date(2025, 12, 31))
+    assert fake.waited() <= 2 * pd.THROTTLE_MAX_WAIT, f"waited {fake.waited()}s"
+    assert len([s for s in short if s[1] == "photo"]) == 24
+    assert all(total is None for _m, _k, _got, total in short), \
+        "a throttled window's total is unknown, not 0"
+
+
+def test_a_stuck_limiter_is_not_waited_out_again_for_the_next_child():
+    """The breaker spans the whole run: a second child must not repeat the
+    hour-long wait, and its throttled months are still reported."""
+    from datetime import date as _date
+
+    photos = [(f"2025-{m:02d}-10", f"p{m}") for m in range(1, 7)]
+    fake = _FakeGallery(photos=photos, throttle_after=2)
+    _got, short = _walk(fake, _date(2025, 1, 1), _date(2025, 6, 30), kid_ids=["k1", "k2"])
+    assert fake.waited() <= 2 * pd.THROTTLE_MAX_WAIT, f"waited {fake.waited()}s"
+    assert len([s for s in short if s[1] == "photo"]) == 12, short
+
+
+def test_paginate_gallery_in_page_wait_never_exceeds_the_cap():
+    fake = _FakeGallery(photos=[("2025-01-10", f"p{i}") for i in range(60)],
+                        throttle_after=1)
+    orig = pd.fetch_json, pd.time.sleep
+    pd.fetch_json, pd.time.sleep = fake.fetch, fake.sleep
+    try:
+        _out, total, ok = pd._paginate_gallery(None, GALLERY_BASE, pd.GALLERY_PHOTO_PATH,
+                                               "photo", {})
+    finally:
+        pd.fetch_json, pd.time.sleep = orig
+    assert (total, ok) == (60, False)
+    assert fake.waited() <= pd.THROTTLE_MAX_WAIT, f"waited {fake.waited()}s"
 
 
 def test_gallery_single_child_folds_in():
