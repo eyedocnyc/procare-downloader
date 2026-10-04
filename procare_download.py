@@ -2026,7 +2026,7 @@ def _print_download_summary(stats, out_dir, ranged):
         for month, kind, got, total in gallery_shortfalls:
             print(f"       {month}  {kind}s: got {got} of {total if total is not None else '?'}")
         print("     Wait a while (rate limits lift on their own) and re-run the same")
-        print("     command — finished files are skipped, so it resumes where it left off.")
+        print("     command — files you already have are skipped.")
 
 
 if __name__ == "__main__":
