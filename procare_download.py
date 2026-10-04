@@ -576,54 +576,58 @@ def download_file(session, media_session, url, dest):
         # fetched over a channel that could expose a signed link or be tampered.
         return False, b""
     use_session = session if is_procare_host(url) else media_session
-    for attempt in range(RETRIES):
-        try:
-            with use_session.get(url, stream=True, timeout=REQUEST_TIMEOUT,
-                                 allow_redirects=True) as resp:
-                if resp.status_code != 200:
-                    if resp.status_code in (429, 500, 502, 503, 504) and attempt < RETRIES - 1:
-                        time.sleep(2 ** attempt)
-                        continue
+    tmp = dest + ".part"
+    try:
+        for attempt in range(RETRIES):
+            try:
+                with use_session.get(url, stream=True, timeout=REQUEST_TIMEOUT,
+                                     allow_redirects=True) as resp:
+                    if resp.status_code != 200:
+                        if resp.status_code in (429, 500, 502, 503, 504) and attempt < RETRIES - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        return False, b""
+
+                    expected = resp.headers.get("Content-Length")
+                    expected = int(expected) if expected and expected.isdigit() else None
+                    content_type = resp.headers.get("Content-Type")
+
+                    written = 0
+                    head = b""
+                    with open(tmp, "wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=1 << 16):
+                            if chunk:
+                                if not head:
+                                    head = chunk[:16]
+                                fh.write(chunk)
+                                written += len(chunk)
+
+                    # An HTML/JSON error page served with a 200 is a complete, wrong
+                    # response — retrying the same (e.g. expired-signature) URL just
+                    # returns it again, so fail fast without burning the backoff.
+                    if _looks_like_error_page(content_type, head):
+                        return False, b""
+
+                    # A truncated/empty body, by contrast, is often a transient hiccup
+                    # worth retrying.
+                    if written == 0 or (expected is not None and written != expected):
+                        if attempt < RETRIES - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        return False, b""
+
+                    os.replace(tmp, dest)
+                    return True, head
+            except requests.RequestException:
+                if attempt == RETRIES - 1:
                     return False, b""
-
-                expected = resp.headers.get("Content-Length")
-                expected = int(expected) if expected and expected.isdigit() else None
-                content_type = resp.headers.get("Content-Type")
-
-                tmp = dest + ".part"
-                written = 0
-                head = b""
-                with open(tmp, "wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=1 << 16):
-                        if chunk:
-                            if not head:
-                                head = chunk[:16]
-                            fh.write(chunk)
-                            written += len(chunk)
-
-                # An HTML/JSON error page served with a 200 is a complete, wrong
-                # response — retrying the same (e.g. expired-signature) URL just
-                # returns it again, so fail fast without burning the backoff.
-                if _looks_like_error_page(content_type, head):
-                    _remove_quiet(tmp)
-                    return False, b""
-
-                # A truncated/empty body, by contrast, is often a transient hiccup
-                # worth retrying.
-                if written == 0 or (expected is not None and written != expected):
-                    _remove_quiet(tmp)
-                    if attempt < RETRIES - 1:
-                        time.sleep(2 ** attempt)
-                        continue
-                    return False, b""
-
-                os.replace(tmp, dest)
-                return True, head
-        except requests.RequestException:
-            if attempt == RETRIES - 1:
-                return False, b""
-            time.sleep(2 ** attempt)
-    return False, b""
+                time.sleep(2 ** attempt)
+        return False, b""
+    finally:
+        # Whatever ended the attempt -- a bad body, retries used up, or an
+        # exception mid-stream -- a partial file must not outlive it. After a
+        # success it was already renamed to `dest`, so this is a no-op.
+        _remove_quiet(tmp)
 
 
 def apply_timestamp(path, dt):

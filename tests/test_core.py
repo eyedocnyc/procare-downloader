@@ -616,6 +616,37 @@ def test_error_page_rejected():
     assert pd._looks_like_error_page(None, b"\x00\x00\x00\x18ftypmp42") is False
 
 
+def test_download_file_leaves_no_partial_when_the_stream_breaks():
+    """A connection that drops mid-body on the last attempt must not strand a
+    `.part` file next to the media: nothing would ever clean it up."""
+    class Broken:
+        status_code, headers = 200, {"Content-Type": "image/jpeg"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size=0):
+            yield b"\xff\xd8\xff\x00"
+            raise pd.requests.exceptions.ChunkedEncodingError("connection reset")
+
+    class Session:
+        def get(self, url, **kw):
+            return Broken()
+
+    out = tempfile.mkdtemp(prefix="pd_part_")
+    dest = os.path.join(out, "photo.part")
+    orig_sleep, pd.time.sleep = pd.time.sleep, lambda *_a: None
+    try:
+        ok, _head = pd.download_file(Session(), Session(), "https://cdn/x.jpg", dest)
+    finally:
+        pd.time.sleep = orig_sleep
+    assert ok is False
+    assert os.listdir(out) == [], f"partial download left behind: {os.listdir(out)}"
+
+
 def test_stable_media_ident_deterministic():
     u = "https://cdn/attachments/files/x/original/open-uri-random?Signature=changes"
     # Deterministic across calls, ignores the (changing) query, never "None"/hash().
