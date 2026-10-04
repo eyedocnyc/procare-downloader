@@ -1891,12 +1891,35 @@ def category_colors(category):
     return CATEGORY_STYLES.get(category, CATEGORY_DEFAULT_STYLE)
 
 
-def render_messages_html(conversations, messages, our_ids=frozenset(), our_names=frozenset()):
-    """A self-contained transcript grouped by chat channel (Office / Classroom),
-    newest first. Each channel is color-coded; the family's own messages
-    (`our_ids`/`our_names`) get a distinct blue "you / family" style regardless of
-    channel. Bodies keep clickable links; unparsable messages fall back to raw JSON
-    so nothing is hidden."""
+def rel_path(target, start):
+    """`target` as a URL path relative to `start`, for a file:// page."""
+    import scrapbook as _sb
+    return _sb.rel_href(target, start)
+
+
+def category_class(category):
+    """The CSS class for a chat channel.
+
+    Channel colours live in the shared stylesheet, not in inline styles, so the
+    transcript restyles with the rest of the scrapbook. Unknown channels fall back
+    to a neutral class rather than going unstyled."""
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in (category or ""))
+    for known in ("office", "classroom"):
+        if known in slug:
+            return f"chan-{known}"
+    return "chan-other"
+
+
+def render_messages_html(conversations, messages, our_ids=frozenset(), our_names=frozenset(),
+                         css_rel="../Scrapbook/assets/scrapbook.css", home_rel=None):
+    """A transcript grouped by chat channel (Office / Classroom), newest first.
+
+    Shares the scrapbook's stylesheet and page shell so it reads as part of the
+    same archive; each channel is colour-coded by CSS class, and the family's own
+    messages (`our_ids`/`our_names`) get a distinct blue "you / family" style
+    regardless of channel. Bodies keep clickable links; unparsable messages fall
+    back to raw JSON so nothing is hidden.
+    """
     esc = _html_escape
     groups = {}
     for m in messages:
@@ -1906,36 +1929,34 @@ def render_messages_html(conversations, messages, our_ids=frozenset(), our_names
         g.sort(key=lambda fm: fm[0]["dt"] or datetime.min, reverse=True)  # newest first
 
     legend = " ".join(
-        f"<span style='border-bottom:3px solid {a}'>{esc(c)}</span>"
-        for c, (_bg, a) in CATEGORY_STYLES.items())
-    parts = ["<!doctype html><meta charset='utf-8'><title>Messages</title>",
-             "<style>body{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:760px;"
-             "margin:2rem auto;padding:0 1rem;color:#222}h2{padding-top:1.5rem}"
-             ".m{margin:.6rem 0;padding:.6rem .8rem;border-radius:10px}"
-             ".us{background:#e3f0ff;border:1px solid #bcdcff;margin-left:2.5rem}"
-             ".subj{font-weight:600}.meta{color:#777;font-size:.82em;margin:.1rem 0 .4rem}"
-             ".tag{color:#2563eb;font-weight:600}.body{white-space:pre-wrap}a{color:#2563eb}"
-             "pre{white-space:pre-wrap;background:#eee;padding:.5rem;border-radius:6px;font-size:.8em}</style>",
-             f"<h1>Messages</h1><p>{len(messages)} message(s), newest first. Channels: {legend}. "
-             "<span class='tag'>Blue, indented</span> = your family. "
-             "<code>messages.json</code> holds the complete raw data.</p>"]
+        f"<span class='key {category_class(c)}'>{esc(c)}</span>"
+        for c in CATEGORY_STYLES)
+    back = (f"<a class='home' href='{esc(home_rel)}'>&larr; Scrapbook</a>"
+            if home_rel else "")
+    parts = [f"<header class='top'>{back}<h1>Messages</h1>"
+             f"<div class='who'>{len(messages)} message(s), newest first. "
+             f"Channels: {legend}. <span class='tag'>Blue, indented</span> = your family.</div>"
+             "<div class='statsub'><code>messages.json</code> holds the complete raw data."
+             "</div></header>",
+             "<div class='msgs'>"]
     for category in sorted(groups):
-        bg, accent = category_colors(category)
-        parts.append(f"<h2 style='border-bottom:2px solid {accent}'>{esc(category)}</h2>")
+        parts.append(f"<h2 class='{category_class(category)}'>{esc(category)}</h2>")
         for f, m in groups[category]:
             when = f["dt"].strftime("%Y-%m-%d %H:%M") if f["dt"] else ""
             us = _is_from_us(m, our_ids, our_names)
             tag = " <span class='tag'>· you / family</span>" if us else ""
             meta = (f"<div class='subj'>{esc(f['subject'] or '(no subject)')}</div>"
                     f"<div class='meta'>{esc(f['sender'] or 'Unknown')}{tag} · {esc(when)}</div>")
-            # Family messages: blue "us" style. School messages: the channel's tint.
-            attrs = "class='m us'" if us else f"class='m' style='background:{bg};border-left:3px solid {accent}'"
+            # Family messages get the "us" style on top of the channel's colour.
+            classes = f"msg {category_class(category)}" + (" us" if us else "")
             if f["body"]:
                 body = f"<div class='body'>{_message_body_html(f['body'])}</div>"
             else:  # unparsed -> show the raw (scrubbed) message so nothing is lost
                 body = f"<pre>{esc(json.dumps(scrub_signed_urls(m), indent=2, default=str))}</pre>"
-            parts.append(f"<div {attrs}>{meta}{body}</div>")
-    return "\n".join(parts)
+            parts.append(f"<div class='{classes}'>{meta}{body}</div>")
+    parts.append("</div>")
+    import scrapbook as _sb
+    return _sb.page_shell("Messages", "\n".join(parts), css_rel=css_rel)
 
 
 def fetch_carers(session, base, reauth=None):
@@ -1951,7 +1972,8 @@ def fetch_carers(session, base, reauth=None):
     return out
 
 
-def archive_messages(session, media_session, base, out_dir, since_dt=None, until_dt=None, reauth=None):
+def archive_messages(session, media_session, base, out_dir, since_dt=None, until_dt=None, reauth=None,
+                     scrapbook_pending=False):
     """Fetch, archive, and render the parent's message threads (experimental).
 
     Writes Messages/messages.json (raw, signed URLs stripped, owner-only) as the
@@ -1959,7 +1981,9 @@ def archive_messages(session, media_session, base, out_dir, since_dt=None, until
     downloads any attachments. `since_dt`/`until_dt` keep only messages whose
     timestamp falls in range (client-side — the API's own date-filter params are
     unverified — so it's handy for pulling a few days to refine the format).
-    Returns the message count."""
+    `scrapbook_pending` says this run builds the scrapbook afterwards, so the
+    transcript links back to a landing page that doesn't exist yet.
+    Returns the number of messages fetched this run."""
     print("Archiving messages (experimental)...")
     conversations = _paginate(session, base, CONVERSATIONS_PATH, reauth, "conversations")
     # The default query returns the full inbox, which already contains BOTH the
@@ -2000,8 +2024,18 @@ def archive_messages(session, media_session, base, out_dir, since_dt=None, until
     ours = sum(1 for m in messages if _is_from_us(m, our_ids, our_names))
 
     html_path = os.path.join(msg_dir, "messages.html")
+    # The transcript shares the scrapbook's stylesheet, so make sure it exists even
+    # on a --messages run that never builds the scrapbook. A relative <link> is all
+    # this needs: stylesheets load fine over file://, no web server involved.
+    import scrapbook as _sb
+    _sb.write_css(_sb.pages_root(out_dir))
+    css_rel = rel_path(os.path.join(_sb.pages_root(out_dir), "assets", "scrapbook.css"), msg_dir)
+    landing = os.path.join(out_dir, "Open Scrapbook.html")
+    home_rel = (rel_path(landing, msg_dir)
+                if scrapbook_pending or os.path.exists(landing) else None)
     with open(html_path, "w", encoding="utf-8") as fh:
-        fh.write(render_messages_html(conversations, messages, our_ids, our_names))
+        fh.write(render_messages_html(conversations, messages, our_ids, our_names,
+                                      css_rel=css_rel, home_rel=home_rel))
     if os.name == "posix":
         try:
             os.chmod(html_path, 0o600)
@@ -2094,7 +2128,8 @@ def run(args):
     # Independent data types: archive each selected kind, skip the rest.
     want = select_data(args)
     if want["messages"]:
-        archive_messages(session, media_session, base, out_dir, since_dt, until_dt, reauth=reauth)
+        archive_messages(session, media_session, base, out_dir, since_dt, until_dt, reauth=reauth,
+                         scrapbook_pending=want["media"] and want_scrapbook)
     if not want["media"]:
         return
 

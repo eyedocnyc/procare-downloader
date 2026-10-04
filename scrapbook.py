@@ -17,6 +17,7 @@ whole output folder together when sharing.
 """
 
 import html
+import json
 import os
 import urllib.parse
 from collections import OrderedDict
@@ -232,6 +233,25 @@ def group_records(records):
     return groups
 
 
+def count_label(kinds):
+    """"3 photos · 1 video" for a list of media kinds. '' when there are none."""
+    nphoto, nvideo = kinds.count("photo"), kinds.count("video")
+    bits = ([f"{nphoto} photos" if nphoto != 1 else "1 photo"] if nphoto else []) + \
+           ([f"{nvideo} videos" if nvideo != 1 else "1 video"] if nvideo else [])
+    return " · ".join(bits)
+
+
+def _media_block(records, media_dir, pages_dir, force_grid=False):
+    """The media for these records, wrapped in the masonry grid when there is more
+    than one. Shared by activity cards and the gallery card so a batch of photos
+    looks identical however Procare happened to deliver it."""
+    kinds = [k for r in records for _, _, _, k in pd.collect_media_entries(r)]
+    media = "\n".join(media_html(r, media_dir, pages_dir) for r in records)
+    if media and (force_grid or len(kinds) > 1):
+        media = f'<div class="media-grid">{media}</div>'
+    return media, kinds
+
+
 def render_card(records, media_dir, pages_dir):
     """Render one entry from a batch of records grouped by `_group_key`. Usually a
     single record; for a multi-photo post the header and caption come from the
@@ -242,20 +262,47 @@ def render_card(records, media_dir, pages_dir):
     dt = record_dt(record)
     staff = record.get("staff_present_name") or ""
     body = content_text(record)
-    kinds = [k for r in records for _, _, _, k in pd.collect_media_entries(r)]
-    media = "\n".join(media_html(r, media_dir, pages_dir) for r in records)
-    count = ""
-    if len(kinds) > 1:
-        media = f'<div class="media-grid">{media}</div>'
-        nphoto, nvideo = kinds.count("photo"), kinds.count("video")
-        bits = ([f"{nphoto} photos" if nphoto != 1 else "1 photo"] if nphoto else []) + \
-               ([f"{nvideo} videos" if nvideo != 1 else "1 video"] if nvideo else [])
-        count = " · ".join(bits)
+    media, kinds = _media_block(records, media_dir, pages_dir)
+    count = count_label(kinds) if len(kinds) > 1 else ""
     meta = " · ".join(p for p in (fmt_time(dt), esc(staff), count) if p)
     return f"""<div class="card">
   <div class="card-head"><span class="badge">{emoji} {esc(label)}</span>
     <span class="meta">{meta}</span></div>
   {body}
+  {media}
+</div>"""
+
+
+GALLERY_BADGE = "🖼 Gallery"
+
+
+def render_gallery_card(records, media_dir, pages_dir):
+    """One card holding a whole day's gallery media, as a grid.
+
+    Media uploaded straight to Procare's gallery arrives as one record per file
+    with its own timestamp and no caption, so `_group_key` can never batch it --
+    a day of it would render as hundreds of single-photo cards, which is how the
+    months before the activity feed began used to look. Grouping the day into one
+    grid gives it the same shape as a multi-photo post, using the same `.card` and
+    `.media-grid` markup so the two are visually identical.
+
+    Deliberately not merged with the tagged activity photos of the same day: these
+    carry no caption, no staff name and no child tag, and folding them together
+    would imply an attribution Procare never made.
+    """
+    records = sorted(records, key=lambda r: record_dt(r) or datetime.min)
+    media, kinds = _media_block(records, media_dir, pages_dir, force_grid=True)
+    if not media:
+        return ""
+    times = [record_dt(r) for r in records if record_dt(r)]
+    when = fmt_time(times[0]) if times else ""
+    if len(times) > 1 and fmt_time(times[-1]) != when:
+        when = f"{when}–{fmt_time(times[-1])}"
+    meta = " · ".join(p for p in (when, count_label(kinds)) if p)
+    return f"""<div class="card">
+  <div class="card-head"><span class="badge">{GALLERY_BADGE}</span>
+    <span class="meta">{esc(meta)}</span></div>
+  <p class="galnote">Uploaded to the gallery — no caption or name attached.</p>
   {media}
 </div>"""
 
@@ -267,14 +314,20 @@ def render_day(dkey, records, media_dir, pages_dir):
     routine = [r for r in records if r.get("activity_type") in ROUTINE_TYPES]
     content = [r for r in records if r.get("activity_type") not in ROUTINE_TYPES]
     content.sort(key=lambda r: record_dt(r) or datetime.min)
+    # Gallery uploads have no caption to batch on, so they get one grid per day
+    # instead of one card per file -- see render_gallery_card.
+    gallery = [r for r in content if pd.is_gallery_record(r)]
+    tagged = [r for r in content if not pd.is_gallery_record(r)]
 
     parts = [f'<section class="day"><h3 class="day-head">{esc(heading)}</h3>']
     if routine:
         badges = " ".join(f'<span class="rb">{routine_summary(r)}</span>'
                           for r in sorted(routine, key=lambda r: record_dt(r) or datetime.min))
         parts.append(f'<div class="daily-log"><span class="dl-label">Daily log</span>{badges}</div>')
-    for group in group_records(content):
+    for group in group_records(tagged):
         parts.append(render_card(group, media_dir, pages_dir))
+    if gallery:
+        parts.append(render_gallery_card(gallery, media_dir, pages_dir))
     parts.append("</section>")
     return "\n".join(parts)
 
@@ -380,13 +433,101 @@ def stats_html(records):
             + (f'<div class="statsub">{esc(sub)}</div>' if sub else ""))
 
 
+MESSAGES_DIR = "Messages"          # written by --messages, beside Media/ and Scrapbook/
+
+
+def messages_summary(out_dir):
+    """Stats for the archived messages, or None when there is no archive.
+
+    Read straight off `Messages/messages.json` (the raw archive is the source of
+    truth) so the scrapbook can link to the transcript without the message
+    fetcher having to hand anything over."""
+    path = os.path.join(out_dir, MESSAGES_DIR, "messages.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    messages = data.get("messages") if isinstance(data, dict) else data
+    if not isinstance(messages, list) or not messages:
+        return None
+
+    channels, days = {}, set()
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        fields = pd.message_fields(m)
+        channels[fields["category"]] = channels.get(fields["category"], 0) + 1
+        if fields["dt"]:
+            days.add(fields["dt"].strftime("%Y-%m-%d"))
+    page = os.path.join(out_dir, MESSAGES_DIR, "messages.html")
+    return {"count": len(messages), "channels": channels,
+            "span": f"{_pretty_day(min(days))} – {_pretty_day(max(days))}" if days else "",
+            "page": page if os.path.exists(page) else None}
+
+
+def messages_html(summary, landing_dir):
+    """The landing-page block summarising messages and linking to the transcript."""
+    if not summary:
+        return ""
+    pills = [f'<span class="stat"><b>{summary["count"]:,}</b> messages</span>']
+    for label in sorted(summary["channels"]):
+        pills.append(f'<span class="stat"><b>{summary["channels"][label]:,}</b> {esc(label)}</span>')
+    sub = esc(summary["span"])
+    if summary["page"]:
+        link = rel_href(summary["page"], landing_dir)
+        action = f'<a class="home" href="{link}">Read the messages &rarr;</a>'
+    else:
+        # The raw JSON is always written; the transcript only on a --messages run.
+        action = '<span class="who">Run with --messages to build the transcript.</span>'
+    return f"""<section class="panel">
+  <h2 class="panel-head">Messages</h2>
+  <div class="stats">{"".join(pills)}</div>
+  {f'<div class="statsub">{sub}</div>' if sub else ""}
+  {action}
+</section>"""
+
+
+def year_rows(months, row_for_month, totals_for_month):
+    """Group month rows under year headings, newest year first within the given
+    order. `months` is the ordered month keys; the two callbacks render one row and
+    return that month's (photos, videos) so the year heading can total them.
+
+    Grouping by year is what makes a multi-year archive readable: a flat list of
+    twenty-odd months gives no sense of where one year ends and the next begins.
+    """
+    out, current, buffer, totals = [], None, [], [0, 0]
+
+    def flush():
+        if not buffer:
+            return
+        bits = count_label(["photo"] * totals[0] + ["video"] * totals[1])
+        summary = f'<span class="year-sum">{esc(bits)}</span>' if bits else ""
+        out.append(f'<section class="year"><h2 class="year-head">{esc(current)}'
+                   f'{summary}</h2>\n<ul class="months">\n'
+                   + "\n".join(buffer) + "\n</ul></section>")
+
+    for mk in months:
+        year = mk.split("-")[0]
+        if year != current:
+            flush()
+            current, buffer, totals = year, [], [0, 0]
+        buffer.append(row_for_month(mk))
+        photos, videos = totals_for_month(mk)
+        totals[0] += photos
+        totals[1] += videos
+    flush()
+    return "\n".join(out)
+
+
 def write_css(root):
     os.makedirs(os.path.join(root, "assets"), exist_ok=True)
     with open(os.path.join(root, "assets", "scrapbook.css"), "w", encoding="utf-8") as fh:
         fh.write(CSS)
 
 
-def _build_section(records, pages_dir, media_dir, landing_path, who, school, class_name):
+def _build_section(records, pages_dir, media_dir, landing_path, who, school, class_name,
+                   messages=None):
     """Write month pages into `pages_dir` (+ its assets) and a landing page at
     `landing_path`, linking to media under `media_dir`. Returns page count."""
     os.makedirs(pages_dir, exist_ok=True)
@@ -431,19 +572,24 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
         with open(os.path.join(pages_dir, month_filename(mk)), "w", encoding="utf-8") as fh:
             fh.write(page)
 
-    rows = []
-    for mk in months:
+    def month_counts(mk):
         recs = [r for d in by_month[mk].values() for r in d]
-        photos = sum(1 for r in recs if r.get("activity_type") == "photo_activity")
-        videos = sum(1 for r in recs if r.get("activity_type") == "video_activity")
-        notes = sum(1 for r in recs if r.get("activity_type") == "note_activity")
-        summary = " · ".join(s for s in (
+        return (sum(1 for r in recs if r.get("activity_type") == "photo_activity"),
+                sum(1 for r in recs if r.get("activity_type") == "video_activity"),
+                sum(1 for r in recs if r.get("activity_type") == "note_activity"),
+                len(recs))
+
+    def month_row(mk):
+        photos, videos, notes, total = month_counts(mk)
+        summary = " · ".join(part for part in (
             f"{photos} photos" if photos else "",
             f"{videos} videos" if videos else "",
-            f"{notes} notes" if notes else "") if s) or f"{len(recs)} entries"
+            f"{notes} notes" if notes else "") if part) or f"{total} entries"
         month_link = rel_href(os.path.join(pages_dir, month_filename(mk)), landing_dir)
-        rows.append(f'<li><a href="{month_link}">{esc(month_label(mk))}</a>'
-                    f'<span class="sum">{esc(summary)}</span></li>')
+        return (f'<li><a href="{month_link}">{esc(month_label(mk))}</a>'
+                f'<span class="sum">{esc(summary)}</span></li>')
+
+    timeline = year_rows(months, month_row, lambda mk: month_counts(mk)[:2])
 
     school_line = f'<div class="school">{esc(school)}</div>' if school else ""
     class_line = f'<div class="who">{esc(class_name)}</div>' if class_name else ""
@@ -454,9 +600,8 @@ def _build_section(records, pages_dir, media_dir, landing_path, who, school, cla
   <div class="who">A collection of memories — {len(records):,} moments</div>
   {stats_html(records)}
 </header>
-<ul class="months">
-{chr(10).join(rows)}
-</ul>
+{messages_html(messages, landing_dir)}
+{timeline}
 <footer class="foot">Keep this folder together — the pages link to the photos and
 videos in the Media folder. Generated {esc(datetime.now().strftime('%Y-%m-%d'))}.</footer>"""
     os.makedirs(landing_dir, exist_ok=True)
@@ -476,6 +621,7 @@ def build_scrapbook(sections, out_dir, school=None):
     single child, or a per-child subfolder name. Returns total month pages.
     """
     sections = [s for s in sections if s.get("records")]
+    messages = messages_summary(out_dir)
     if not sections:
         write_css(pages_root(out_dir))
         landing = os.path.join(out_dir, "Open Scrapbook.html")
@@ -483,7 +629,8 @@ def build_scrapbook(sections, out_dir, school=None):
             fh.write(page_shell("Procare Scrapbook",
                                 '<header class="top"><h1>Procare Scrapbook</h1>'
                                 '<div class="who">No activities found in the selected range.</div>'
-                                '</header>', css_rel="Scrapbook/assets/scrapbook.css"))
+                                '</header>' + messages_html(messages, out_dir),
+                                css_rel="Scrapbook/assets/scrapbook.css"))
         return 0
 
     # Single child: landing at the root; pages under Scrapbook/, media under Media/.
@@ -491,7 +638,7 @@ def build_scrapbook(sections, out_dir, school=None):
         s = sections[0]
         return _build_section(s["records"], pages_root(out_dir), media_root(out_dir),
                               os.path.join(out_dir, "Open Scrapbook.html"),
-                              s["name"], school, s.get("class_name"))
+                              s["name"], school, s.get("class_name"), messages=messages)
 
     # Multiple children: each child self-contained under Scrapbook/<Child> +
     # Media/<Child>, with a master "choose a child" index at the root.
@@ -530,7 +677,8 @@ def build_scrapbook(sections, out_dir, school=None):
 </header>
 <ul class="months">
 {items}
-</ul>"""
+</ul>
+{messages_html(messages, out_dir)}"""
     with open(os.path.join(out_dir, "Open Scrapbook.html"), "w", encoding="utf-8") as fh:
         fh.write(page_shell("Procare Scrapbook", body, css_rel="Scrapbook/assets/scrapbook.css"))
     return total
@@ -591,6 +739,50 @@ img.media{cursor:zoom-in;}
   color:#5c554b;}
 .stat b{color:var(--accent);}
 .statsub{color:var(--muted);font-size:.85rem;margin-bottom:4px;}
+/* Timeline grouped by year. */
+.year{max-width:820px;margin:22px auto 0;padding:0 20px;}
+.year-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+  font-size:1.3rem;margin:0 0 10px;padding-bottom:6px;color:var(--accent);
+  border-bottom:2px solid var(--line);}
+.year-sum{color:var(--muted);font-size:.85rem;font-weight:400;}
+.year .months{margin:0 auto 18px;padding:0;}
+
+/* Panels on the landing page (messages, and anything similar later). */
+.panel{max-width:820px;margin:20px auto 0;padding:16px 18px;background:var(--card);
+  border:1px solid var(--line);border-radius:14px;box-shadow:0 1px 2px rgba(0,0,0,.03);}
+.panel-head{margin:0 0 8px;font-size:1.15rem;color:var(--accent);}
+.panel .stats{margin:0 0 6px;}
+.panel .home{display:inline-block;margin-top:6px;font-weight:600;}
+
+/* Gallery uploads: no caption, so the card says why it has none. */
+.galnote{color:var(--muted);font-size:.85rem;margin:.2em 0 .4em;}
+
+/* Messages transcript. Shares the card/stat vocabulary above so it reads as part
+   of the same scrapbook, not a separate tool.
+
+   Each channel sets its colour ONCE as a custom property; the message tint, the
+   section heading rule and the legend underline all read from it. Adding a
+   channel is one .chan-* rule, not three. */
+.chan-office{--chan:#ea9010;--chan-bg:#fff8ef;}
+.chan-classroom{--chan:#3f9142;--chan-bg:#f2f9f2;}
+.chan-other{--chan:var(--muted);--chan-bg:var(--card);}
+.msgs{max-width:820px;margin:0 auto;padding:0 20px;}
+.msgs h2{margin:28px 0 6px;padding-bottom:6px;font-size:1.2rem;color:var(--accent);
+  border-bottom:2px solid var(--chan,var(--line));}
+.msg{background:var(--chan-bg,var(--card));border:1px solid var(--line);
+  border-left:3px solid var(--chan,var(--muted));border-radius:12px;
+  padding:12px 14px;margin:10px 0;}
+.msg .subj{font-weight:600;}
+.msg .body{white-space:pre-wrap;}
+.msg a{color:#2563eb;}
+.msg pre{white-space:pre-wrap;background:var(--chip);padding:.5rem;border-radius:8px;
+  font-size:.8em;overflow-x:auto;}
+/* Family-sent messages override the channel tint and indent, so "who said it"
+   reads before "which channel". */
+.msg.us{--chan:#2563eb;--chan-bg:#eef4ff;border-color:#cfe0ff;margin-left:2.5rem;}
+.tag{color:#2563eb;font-weight:600;}
+.key{display:inline-block;border-bottom:3px solid var(--chan,var(--muted));padding:0 2px;}
+
 .lightbox{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.86);
   align-items:center;justify-content:center;cursor:zoom-out;padding:18px;}
 .lightbox.on{display:flex;}

@@ -13,6 +13,7 @@ single vs. multiple children (including per-child media isolation).
 import builtins
 import html
 import io
+import json
 import os
 import re
 import sys
@@ -1172,9 +1173,14 @@ def test_render_messages_html_channels_family_style_and_order():
              "posted_at": "2025-06-03T10:00:00Z"}]
     html = pd.render_messages_html([], msgs, our_ids={"u1"}, our_names={"Jamie Lee"})
     assert "Classroom Chat</h2>" in html and "Office Chat</h2>" in html   # channel sections
-    assert "#22a35a" in html and "#ea9010" in html                       # per-channel color-coding
+    # Channel colours come from CSS classes now, not inline styles, so the
+    # transcript restyles with the rest of the scrapbook.
+    assert "chan-classroom" in html and "chan-office" in html
+    assert "style='background:" not in html, "channel colours belong in the stylesheet"
+    assert "<style>" not in html, "the page must use the shared stylesheet"
+    assert "scrapbook.css" in html
     assert 'href="https://x.test/a"' in html                             # clickable anchor
-    assert "class='m us'" in html and "you / family" in html             # family styling
+    assert "msg chan-classroom us" in html and "you / family" in html    # family styling
     assert "weird_field" in html                                         # bodyless -> raw JSON
     # Reverse chronological within a channel: newest ("Newer") before oldest ("Older").
     assert html.index("Newer") < html.index("Older")
@@ -1191,6 +1197,246 @@ def test_select_data_independent_flags():
     assert pd.select_data(A(messages=True)) == {"media": False, "messages": True}  # independent
     assert pd.select_data(A(all_data=True)) == {"media": True, "messages": True}
     assert pd.select_data(A(media=True, messages=True)) == {"media": True, "messages": True}
+
+
+def test_category_class_is_stable_and_has_a_fallback():
+    assert pd.category_class("Office Chat") == "chan-office"
+    assert pd.category_class("Classroom Chat") == "chan-classroom"
+    # An unknown channel must still get a class, or it would render unstyled.
+    assert pd.category_class("Bus Route") == "chan-other"
+    assert pd.category_class("") == "chan-other"
+    assert pd.category_class(None) == "chan-other"
+
+
+def test_gallery_media_groups_into_one_card_per_day():
+    """Gallery uploads have no caption to batch on, so without this a day of them
+    renders as hundreds of single-photo cards -- which is how every month before
+    the activity feed began used to look."""
+    out = tempfile.mkdtemp(prefix="pd_gal_")
+    recs = []
+    for i in range(5):
+        dt = datetime(2025, 1, 8, 9 + i, 30)
+        rec = pd.gallery_entry_to_record(
+            f"https://cdn/photos/files/g{i}/main/g{i}.jpg", dt, f"g{i}", "photo", "k1")
+        plant(out, rec)
+        recs.append(rec)
+    html = sb.render_day("2025-01-08", recs, out, out)
+    assert html.count('class="card"') == 1, "a day of gallery media is ONE card"
+    assert html.count("media-grid") == 1
+    assert html.count("<img") == 5, "every photo still shown"
+    assert sb.GALLERY_BADGE in html
+    assert "5 photos" in html
+
+
+def test_gallery_and_activity_media_stay_separate_cards():
+    """Gallery items carry no caption, staff or child tag; folding them in with
+    tagged activity photos would imply an attribution Procare never made."""
+    out = tempfile.mkdtemp(prefix="pd_mix_")
+    dt = datetime(2025, 1, 8, 10)
+    act = photo_activity("k1", "2025-01-08", "p1", caption="Painting today")
+    gal = pd.gallery_entry_to_record(
+        "https://cdn/photos/files/g1/main/g1.jpg", dt, "g1", "photo", "k1")
+    plant(out, act)
+    plant(out, gal)
+    html = sb.render_day("2025-01-08", [act, gal], out, out)
+    assert html.count('class="card"') == 2
+    assert "Painting today" in html
+    assert sb.GALLERY_BADGE in html
+    # A single gallery photo still uses the same grid markup as a batch, so the
+    # two never look like different kinds of page furniture.
+    assert "media-grid" in html
+
+
+def test_single_photo_activity_is_not_forced_into_a_grid():
+    """The existing look for an ordinary one-photo post must not change."""
+    out = tempfile.mkdtemp(prefix="pd_one_")
+    act = photo_activity("k1", "2025-01-08", "p1", caption="Just one")
+    plant(out, act)
+    html = sb.render_day("2025-01-08", [act], out, out)
+    assert "media-grid" not in html
+
+
+def test_year_rows_groups_months_under_year_headings():
+    months = ["2024-11", "2024-12", "2025-01"]
+    counts = {"2024-11": (10, 1), "2024-12": (5, 0), "2025-01": (7, 2)}
+    html = sb.year_rows(months, lambda mk: f"<li>{mk}</li>", lambda mk: counts[mk])
+    assert html.count('class="year"') == 2, "two years -> two groups"
+    assert html.index("2024") < html.index("2025"), "order follows the months given"
+    # The year heading totals its months: 10+5 photos, 1+0 videos.
+    assert "15 photos" in html and "1 video" in html
+    assert "7 photos" in html and "2 videos" in html
+    # Every month still gets its row.
+    for mk in months:
+        assert f"<li>{mk}</li>" in html
+
+
+def test_year_rows_handles_empty_input():
+    assert sb.year_rows([], lambda mk: "", lambda mk: (0, 0)) == ""
+
+
+def test_count_label_reads_naturally():
+    assert sb.count_label(["photo"]) == "1 photo"
+    assert sb.count_label(["photo", "photo", "video"]) == "2 photos · 1 video"
+    assert sb.count_label([]) == ""
+
+
+def test_messages_summary_reads_the_raw_archive():
+    """The scrapbook links the transcript by reading messages.json, so a media run
+    picks up an earlier --messages run without them having to talk to each other."""
+    out = tempfile.mkdtemp(prefix="pd_msum_")
+    assert sb.messages_summary(out) is None            # no archive -> nothing shown
+    msg_dir = os.path.join(out, sb.MESSAGES_DIR)
+    os.makedirs(msg_dir)
+    with open(os.path.join(msg_dir, "messages.json"), "w", encoding="utf-8") as fh:
+        json.dump({"conversations": [], "messages": [
+            {"message_type": "general", "sender": {"name": "Ms. A"}, "subject": "Hi",
+             "message": "x", "posted_at": "2025-06-01T10:00:00Z"},
+            {"message_type": "parent_admin_com", "sender": {"name": "Office"},
+             "subject": "Bill", "message": "y", "posted_at": "2025-07-02T10:00:00Z"},
+        ]}, fh)
+    summary = sb.messages_summary(out)
+    assert summary["count"] == 2
+    assert summary["channels"] == {"Classroom Chat": 1, "Office Chat": 1}
+    assert "June 1, 2025" in summary["span"] and "July 2, 2025" in summary["span"]
+    assert summary["page"] is None, "no transcript written yet"
+
+    html = sb.messages_html(summary, out)
+    assert "2</b> messages" in html and "Office Chat" in html
+    assert "--messages" in html, "should say how to get the transcript"
+
+    open(os.path.join(msg_dir, "messages.html"), "w").close()
+    summary = sb.messages_summary(out)
+    assert summary["page"]
+    html = sb.messages_html(summary, out)
+    assert "Messages/messages.html" in html and "Read the messages" in html
+
+
+def test_messages_html_is_empty_without_an_archive():
+    assert sb.messages_html(None, "/out") == ""
+
+
+def test_every_emitted_class_has_a_rule_in_the_shared_stylesheet():
+    """Styling lives in one stylesheet; a class with no rule renders unstyled.
+
+    This is what keeps the pages consistent as they grow: forget a rule and the
+    page silently looks wrong, which is exactly the kind of thing nobody notices
+    until much later."""
+    defined = set(re.findall(r"\.([A-Za-z][\w-]*)", sb.CSS))
+    for layout, paths in _archive_every_layout().items():
+        used = set()
+        for path in paths:
+            page_html = open(path, encoding="utf-8").read()
+            for attr in re.findall(r"""class=['"]([^'"]+)['"]""", page_html):
+                used.update(attr.split())
+        assert used, f"{layout}: the pages should emit some classes"
+        missing = sorted(used - defined)
+        assert not missing, f"{layout}: classes with no CSS rule: {missing}"
+
+
+def _archive_every_layout():
+    """Build an archive in each page layout and return {layout: [html paths]}.
+
+    One child, several children plus the shared gallery, and the messages
+    transcript (with the landing-page panel that links it). Styling rules have
+    to hold on every one of them, not just the layout a test happened to use."""
+    dt = datetime(2025, 1, 8, 10)
+    act = photo_activity("k1", "2025-01-08", "p1", caption="Painting")
+    gal = pd.gallery_entry_to_record(
+        "https://cdn/photos/files/g1/main/g1.jpg", dt, "g1", "photo", "k1")
+    sibling = photo_activity("k2", "2025-02-03", "p2", caption="Blocks")
+    layouts: dict[str, list[dict]] = {
+        "single child": [{"name": "Maya", "class_name": "Daffodils", "folder": "",
+                          "records": [act, gal]}],
+        "several children": [
+            {"name": "Maya", "class_name": "Daffodils", "folder": "Maya", "records": [act]},
+            {"name": "Leo", "class_name": "", "folder": "Leo", "records": [sibling]},
+            {"name": "Shared Gallery", "class_name": "", "folder": "Shared Gallery",
+             "records": [gal], "shared": True}],
+    }
+    inbox = [{"id": 1, "message_type": "general", "sender": {"name": "Ms. A"},
+              "subject": "Hi", "message": 'See <a href="https://x.test/a">this</a>',
+              "posted_at": "2025-06-01T10:00:00Z"},
+             {"id": 2, "message_type": "parent_admin_com", "sender": {"id": "u1", "name": "Dad"},
+              "subject": "Re", "message": "Thanks", "posted_at": "2025-06-02T10:00:00Z"},
+             {"id": 3, "message_type": "new_channel", "sender": {"name": "Bus"},
+              "subject": "Route", "message": "On time", "posted_at": "2025-06-03T10:00:00Z"}]
+    orig_paginate, orig_carers = pd._paginate, pd.fetch_carers
+    pd._paginate = lambda s, b, path, r, *k, **kw: list(inbox) if path == pd.MESSAGES_PATH else []
+    carers: list = [{"id": "u1", "name": "Dad"}]
+    pd.fetch_carers = lambda *a, **kw: carers
+    pages = {}
+    try:
+        for layout, sections in layouts.items():
+            out = tempfile.mkdtemp(prefix="pd_layout_")
+            for s in sections:
+                for rec in s["records"]:
+                    plant(sb.media_root(out, s["folder"]), rec)
+            with redirect_stdout(io.StringIO()):
+                pd.archive_messages(None, None, "https://x/", out, scrapbook_pending=True)
+            sb.build_scrapbook(sections, out)
+            pages[layout] = [os.path.join(root, f) for root, _dirs, files in os.walk(out)
+                             for f in files if f.endswith(".html")]
+    finally:
+        pd._paginate, pd.fetch_carers = orig_paginate, orig_carers
+    return pages
+
+
+def test_pages_link_the_stylesheet_by_relative_path_and_never_inline_styles():
+    """The archive is opened straight off disk, with no web server, so every
+    stylesheet reference has to be a relative path that resolves as a file --
+    and all styling has to come from that stylesheet, on every layout."""
+    for layout, paths in _archive_every_layout().items():
+        names = {os.path.basename(p) for p in paths}
+        assert {"messages.html", "Open Scrapbook.html"} <= names, (layout, names)
+        for page in paths:
+            html = open(page, encoding="utf-8").read()
+            where = f"{layout}: {page}"
+            assert "<style" not in html.lower(), f"{where} inlines a <style> block"
+            assert not re.search(r"<[^>]*\sstyle\s*=", html, re.IGNORECASE), \
+                f"{where} has a style= attribute"
+            links = re.findall(r"""<link rel=["']stylesheet["'] href=["']([^"']+)["']""", html)
+            assert links, f"{where} links no stylesheet"
+            for href in links:
+                assert not href.startswith(("/", "http")), f"{where}: not relative: {href}"
+                target = os.path.join(os.path.dirname(page), urllib.parse.unquote(href))
+                assert os.path.exists(target), f"{where}: stylesheet does not resolve: {href}"
+
+
+def test_transcript_links_home_when_the_scrapbook_is_built_later_in_the_run():
+    """--all-data writes the transcript before the landing page exists; the
+    back-link must still be there, and must not dangle on a --messages-only run."""
+    inbox = [{"id": 1, "message_type": "general", "sender": {"name": "Ms. A"},
+              "subject": "Hi", "message": "x", "posted_at": "2025-06-01T10:00:00Z"}]
+    orig_paginate, orig_carers = pd._paginate, pd.fetch_carers
+    pd._paginate = lambda s, b, path, r, *k, **kw: list(inbox) if path == pd.MESSAGES_PATH else []
+    pd.fetch_carers = lambda *a, **kw: []
+    try:
+        for pending, linked in ((True, True), (False, False)):
+            out = tempfile.mkdtemp(prefix="pd_msghome_")
+            with redirect_stdout(io.StringIO()):
+                pd.archive_messages(None, None, "https://x/", out, scrapbook_pending=pending)
+            transcript = open(os.path.join(out, "Messages", "messages.html"),
+                              encoding="utf-8").read()
+            assert ("Open%20Scrapbook.html" in transcript) is linked, (pending, transcript)
+    finally:
+        pd._paginate, pd.fetch_carers = orig_paginate, orig_carers
+
+
+def test_empty_scrapbook_still_shows_the_messages_panel():
+    """Messages belong to the account, not to a child's media, so a landing page
+    with no activities must still link the message archive."""
+    out = tempfile.mkdtemp(prefix="pd_emptymsg_")
+    msg_dir = os.path.join(out, sb.MESSAGES_DIR)
+    os.makedirs(msg_dir)
+    with open(os.path.join(msg_dir, "messages.json"), "w", encoding="utf-8") as fh:
+        json.dump({"messages": [{"message_type": "general", "sender": {"name": "Ms. A"},
+                                 "subject": "Hi", "message": "x",
+                                 "posted_at": "2025-06-01T10:00:00Z"}]}, fh)
+    open(os.path.join(msg_dir, "messages.html"), "w").close()
+    assert sb.build_scrapbook([], out) == 0
+    landing = open(os.path.join(out, "Open Scrapbook.html"), encoding="utf-8").read()
+    assert "No activities found" in landing
+    assert "Messages/messages.html" in landing, "the messages panel went missing"
 
 
 def main():

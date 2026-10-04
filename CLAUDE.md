@@ -164,6 +164,40 @@ the `Gallery/` subtree, so the scrapbook resolves files in either home. Don't re
 lookup or the download path and the scrapbook will disagree; keep `media_month_dir` as the single
 source of a file's folder.
 
+**One stylesheet, linked relatively — the archive opens straight off disk.** All styling lives in
+`scrapbook.CSS`, written by `write_css` to `Scrapbook/assets/scrapbook.css` (and, on a multi-child
+archive, to each `Scrapbook/<Child>/assets/` as well, so a child's folder is self-contained) and
+referenced by every page through `page_shell(css_rel=...)` as a **relative path**. That includes the
+messages transcript, which `archive_messages` links with `../Scrapbook/assets/scrapbook.css` and
+whose channel colours are CSS classes (`category_class` → `chan-office` / `chan-classroom` /
+`chan-other`), never inline styles;
+each class sets `--chan`/`--chan-bg` once and the tint, heading rule and legend underline all read
+from it, so adding a channel is one rule. A `--messages`-only run calls `write_css` itself, since the
+transcript must not depend on the scrapbook having been built. **Never inline a `<style>` block or a
+`style=` attribute** — tests build every layout (one child, several children plus the shared
+gallery, and the transcript) and assert that no page has either, every emitted class has a rule in
+the stylesheet, and every stylesheet link resolves as a file. No web server is involved: `file://`
+loads relative stylesheets fine (unlike `fetch`/modules, which CORS blocks), so keep references
+relative and never absolute.
+
+**The landing page timeline is grouped by year** (`year_rows`), with each year heading totalling its
+months' photos and videos. A flat list of twenty-odd months gives no sense of where one year ends.
+`messages_summary` / `messages_html` add a panel summarising the message archive (count, per-channel
+counts, date span) and linking to the transcript; it reads `Messages/messages.json` directly, so a
+media run picks up an earlier `--messages` run without the two having to be coordinated. Messages
+belong to the account, not a child: on a multi-child archive the panel goes on the **root** index, not
+on each child's landing page, and an archive with no activities still shows it. The transcript's
+"← Scrapbook" link appears when the landing page exists or this run will build it
+(`scrapbook_pending`): `--all-data` writes the transcript first, before the landing page exists.
+
+**Gallery media renders as ONE card per day, not one per file** (`render_gallery_card`). A gallery
+upload has its own timestamp and no caption, so `_group_key` can never batch it — before this, the
+months that predate the activity feed rendered one card per photo (hundreds of cards for a busy month).
+The day's files go into the same `.card` + `.media-grid` markup a multi-photo post uses (via the
+shared `_media_block`), so the two are visually identical. Gallery items are deliberately **not**
+merged with the same day's tagged activity photos: they carry no caption, staff name or child tag, and
+folding them together would imply an attribution Procare never made.
+
 **Multi-photo posts render as one card, not one per photo.** Procare represents a batch upload as one
 `photo_activity` record *per photo*, but stamps every record in the batch with the same `activity_time`,
 `comment` and `activity_type`. `scrapbook.group_records` collapses a day's content records by that exact
