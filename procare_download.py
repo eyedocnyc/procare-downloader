@@ -693,15 +693,19 @@ def _exiftool_args(meta):
     """Build the exiftool tag arguments (no file path) for one item's metadata.
 
     Pure -> unit-tested. Writes each value into the EXIF, IPTC and XMP homes the
-    various photo apps read, so captions/keywords show up whatever browses them."""
+    various photo apps read, so captions/keywords show up whatever browses them.
+
+    Re-running it on a tagged file changes nothing: each keyword is removed
+    (`-=`) and then added (`+=`), exiftool's documented idiom for adding a list
+    item without duplicating it. Keywords added by other apps are kept."""
     args = ["-overwrite_original", "-codedcharacterset=utf8",
             f"-XMP-xmp:CreatorTool={META_TOOL_TAG}"]
     if meta.get("caption"):
         for tag in ("-EXIF:ImageDescription=", "-IPTC:Caption-Abstract=", "-XMP-dc:Description="):
             args.append(tag + meta["caption"])
     for kw in meta.get("keywords") or []:
-        args.append(f"-IPTC:Keywords+={kw}")
-        args.append(f"-XMP-dc:Subject+={kw}")
+        for tag in ("-IPTC:Keywords", "-XMP-dc:Subject"):
+            args.extend((f"{tag}-={kw}", f"{tag}+={kw}"))
     if meta.get("creator"):
         args.append(f"-EXIF:Artist={meta['creator']}")
         args.append(f"-XMP-dc:Creator={meta['creator']}")

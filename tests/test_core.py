@@ -964,6 +964,17 @@ def test_exiftool_args_cover_exif_iptc_xmp():
     assert "-EXIF:Artist=Ms. A" in args and "-XMP-dc:Creator=Ms. A" in args
 
 
+def test_exiftool_keywords_are_written_idempotently():
+    """`+=` alone appends even when the keyword is already there, so every
+    re-tag (a lost marker, --overwrite) duplicated the person tag. exiftool's
+    documented `-=` then `+=` pair removes the value before adding it back."""
+    args = pd._exiftool_args({"keywords": ["Maya", "activity"]})
+    for tag in ("-IPTC:Keywords", "-XMP-dc:Subject"):
+        for kw in ("Maya", "activity"):
+            add = args.index(f"{tag}+={kw}")
+            assert args[add - 1] == f"{tag}-={kw}", f"{tag}+={kw} needs a -= before it"
+
+
 def test_find_local_media_looks_in_gallery_subtree():
     out = tempfile.mkdtemp(prefix="pd_gal_")
     dt = datetime(2025, 6, 1, 10)

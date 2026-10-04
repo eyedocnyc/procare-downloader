@@ -206,6 +206,10 @@ it idempotent; `--overwrite` re-tags everything.
   Photos won't filter those). Never required — the shipped app has no exiftool, so keep the fallback
   working. `_exiftool_args` is pure (unit-tested); the subprocess/piexif writes aren't.
 - Both writers bump the file mtime, so the writer restores the capture-date mtime afterward.
+- **Keyword writes are idempotent:** `_exiftool_args` emits `-TAG-=kw` before `-TAG+=kw` for
+  `IPTC:Keywords` and `XMP-dc:Subject` (exiftool's documented no-duplicate idiom; `+=` alone appends
+  a second copy on every re-tag). Re-tagging a file is therefore harmless, and it also collapses copies
+  an older version duplicated. Keywords other apps added are kept.
 
 ## Security / privacy
 
