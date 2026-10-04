@@ -1121,6 +1121,43 @@ def test_message_body_html_links_and_escaping():
     assert "<a" not in pd._message_body_html('<a href="javascript:alert(1)">x</a>')
 
 
+def test_message_body_html_bare_url_cannot_swallow_a_link():
+    """A bare URL right before an <a> must not absorb that link's placeholder.
+
+    It used to: the link was spliced into the bare URL's href attribute, so a
+    crafted message could break out of the attribute and add an event handler,
+    and ordinary rich text rendered as broken nested anchors."""
+    from html.parser import HTMLParser
+
+    class Tags(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags = []
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append((tag, attrs))
+
+    cases = [  # (body, anchors expected, visible link text)
+        ('https://zoom.us/j/1<strong><a href="https://ok.com/ onmouseover=alert(1) x=">'
+         'join</a>', 2, "join"),
+        ('https://forms.gle/a<span><a href="https://ok.com/b">form</a></span> and <b>bold</b>',
+         2, "form"),
+        ('Hi \x000\x00 <a href="https://ok.com/c">c</a>', 1, "c"),  # a forged placeholder
+    ]
+    for body, anchors, text in cases:
+        out = pd._message_body_html(body)
+        parser = Tags()
+        parser.feed(out)
+        assert [t for t, _ in parser.tags if t != "br"] == ["a"] * anchors, out
+        for _tag, attrs in parser.tags:
+            names = {name for name, _value in attrs}
+            assert names <= {"href", "target", "rel"}, f"unexpected attribute in {out}"
+            assert not any(name.startswith("on") for name in names), out
+            assert not any("<" in (value or "") for _name, value in attrs), \
+                f"markup nested inside an attribute: {out}"
+        assert f">{html.escape(text, quote=False)}</a>" in out, out
+
+
 def test_is_from_us_matches_family_sender():
     fam_id, fam_names = {"u1"}, {"Jamie Lee"}
     assert pd._is_from_us({"sender": {"id": "u1", "name": "Ray"}}, fam_id, fam_names)   # by id

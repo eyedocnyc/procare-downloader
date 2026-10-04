@@ -1797,6 +1797,9 @@ def _message_body_html(text):
     the local transcript. The raw body stays untouched in messages.json."""
     if not isinstance(text, str):
         return ""
+    # Links are parked as NUL-delimited placeholders while the rest is stripped;
+    # a NUL in the body itself could forge one, so drop them first.
+    text = text.replace("\x00", "")
     links = []
 
     def _stash(mt):
@@ -1816,9 +1819,11 @@ def _message_body_html(text):
                  ("&#39;", "'"), ("&nbsp;", " ")):
         t = t.replace(a, b)
     t = t.strip()
-    # Escape text and turn bare URLs into links, segment by segment.
+    # Escape text and turn bare URLs into links, segment by segment. A bare URL
+    # stops at a placeholder: swallowing one would splice a whole anchor into
+    # this URL's href attribute.
     out = []
-    for i, seg in enumerate(re.split(r"(https?://[^\s<]+)", t)):
+    for i, seg in enumerate(re.split(r"(https?://[^\s<\x00]+)", t)):
         out.append(f'<a href="{_html_escape(seg)}" target="_blank" rel="noopener">{_html_escape(seg)}</a>'
                    if i % 2 else _html_escape(seg))
     t = "".join(out)
