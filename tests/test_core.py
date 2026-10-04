@@ -498,6 +498,22 @@ def test_gentle_constants_are_slower_than_default():
     assert pd.GENTLE_JITTER >= pd.PACING_JITTER
 
 
+def test_gentle_mode_slows_the_default_polite_sleep():
+    """--gentle rebinds the pacing globals at run time, so the default sleep must
+    read them when it is CALLED, not when the function was defined -- otherwise the
+    gallery walk keeps its 0.25s pace while the user asked for a human one."""
+    seen, orig = [], (pd.time.sleep, pd.POLITE_DELAY, pd.PACING_JITTER)
+    pd.time.sleep = seen.append
+    try:
+        pd.enable_gentle_pacing()
+        for _ in range(20):
+            pd.polite_sleep()
+    finally:
+        pd.time.sleep, pd.POLITE_DELAY, pd.PACING_JITTER = orig
+    floor = pd.GENTLE_DELAY * (1 - pd.GENTLE_JITTER)
+    assert min(seen) >= floor - 1e-9, f"slept {min(seen)}s, gentle floor is {floor}s"
+
+
 def test_gallery_step_count_and_progress():
     from datetime import date as _date
     # 1 kid, 2 endpoints, Aug+Sep (2 months): 2 * (1 unfiltered + 2 windows) = 6.

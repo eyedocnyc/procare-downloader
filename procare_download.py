@@ -159,11 +159,21 @@ THROTTLE_BACKOFF = (30, 60, 120, 240, 480, 900)  # seconds to wait, escalating
 THROTTLE_MAX_WAIT = 3600   # give up on a window after this much total waiting
 
 
-def polite_sleep(seconds=POLITE_DELAY):
-    """Sleep `seconds` with jitter, so a long walk doesn't hit the API on a
-    perfectly regular clock (steady machine-gun timing is both ruder and more
-    likely to trip a rate limiter than the same average rate spread unevenly)."""
+def polite_sleep(seconds=None):
+    """Sleep `seconds` (default: the current `POLITE_DELAY`) with jitter, so a long
+    walk doesn't hit the API on a perfectly regular clock (steady machine-gun timing
+    is both ruder and more likely to trip a rate limiter than the same average rate
+    spread unevenly). The default is read at call time: `--gentle` rebinds it."""
+    seconds = POLITE_DELAY if seconds is None else seconds
     time.sleep(max(0.0, seconds * (1.0 + random.uniform(-PACING_JITTER, PACING_JITTER))))
+
+
+def enable_gentle_pacing():
+    """Pace like a person browsing, not a script: seconds between requests, and a
+    wider jitter band so the timing isn't a metronome. Slower by design -- the
+    fastest way to finish a big archive is not to get rate-limited."""
+    global POLITE_DELAY, PACING_JITTER
+    POLITE_DELAY, PACING_JITTER = GENTLE_DELAY, GENTLE_JITTER
 
 
 # --------------------------------------------------------------------------- #
@@ -768,7 +778,7 @@ def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
     if not ok:
         stats["failed"] += 1
         print(f"  ! failed: {url[:80]}")
-        time.sleep(POLITE_DELAY)
+        polite_sleep()
         return
 
     # Name the file by its REAL type (magic bytes), so we never save e.g. a PNG
@@ -782,7 +792,7 @@ def save_media(session, media_session, url, dt, label, ident, out_dir, since_dt,
     if seen is not None:
         seen.add(key)
     print(f"  + {os.path.relpath(dest, out_dir)}")
-    time.sleep(POLITE_DELAY)
+    polite_sleep()
 
 
 # Keys a gallery item MIGHT use to name the child(ren) it belongs to. Observed on
@@ -1378,7 +1388,7 @@ def fetch_all_records(session, base, kids, start_date, end_date,
                         record_ids.add(rid)
                         records.append(it)
                 page += 1
-                time.sleep(POLITE_DELAY)
+                polite_sleep()
 
     if debug and type_counts:
         summary = ", ".join(f"{t}:{c}" for t, c in sorted(type_counts.items()))
@@ -1717,11 +1727,7 @@ def run(args):
     interactive = getattr(args, "_interactive", False)
 
     if getattr(args, "gentle", False):
-        # Pace like a person browsing, not a script: seconds between requests, and
-        # a wider jitter band so the timing isn't a metronome. Slower by design --
-        # the fastest way to finish a big archive is not to get rate-limited.
-        global POLITE_DELAY, PACING_JITTER
-        POLITE_DELAY, PACING_JITTER = GENTLE_DELAY, GENTLE_JITTER
+        enable_gentle_pacing()
         print("Gentle mode: reading slowly to stay under Procare's rate limit.\n")
 
     if not HAVE_PIEXIF:
