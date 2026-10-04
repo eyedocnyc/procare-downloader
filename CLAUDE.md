@@ -242,7 +242,8 @@ it idempotent; `--overwrite` re-tags everything.
   pipeline when media isn't selected — so `--messages` alone does NOT re-walk the photo feed. Add new data
   types here (documents, billing) as their own flag + a branch, and include them in `--all-data`.
 - **`--messages` (EXPERIMENTAL, `archive_messages`)** archives parent↔staff chat to `Messages/` (raw
-  `messages.json` + a best-effort `messages.html` + attachments); honors `--since`/`--until` (client-side
+  `messages.json`, **merged** by message id with the saved file and never replaced, so a dated run can't
+  shrink it, + a best-effort `messages.html` + attachments); honors `--since`/`--until` (client-side
   filter — the API's own date param is unverified). **Shape confirmed against a live account:** a
   `parent/messages` item is `{id, sender:{name}, message (HTML body), posted_at, subject, message_type,
   thread, kids[], attachments[]}`. Key gotchas: **`message_type` is the chat CHANNEL** — `parent_admin_com`

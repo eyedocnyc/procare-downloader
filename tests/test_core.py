@@ -13,6 +13,7 @@ single vs. multiple children (including per-child media isolation).
 import builtins
 import html
 import io
+import json
 import os
 import re
 import sys
@@ -1215,6 +1216,41 @@ def test_render_messages_html_channels_family_style_and_order():
     assert "weird_field" in html                                         # bodyless -> raw JSON
     # Reverse chronological within a channel: newest ("Newer") before oldest ("Older").
     assert html.index("Newer") < html.index("Older")
+
+
+def test_archive_messages_merges_instead_of_replacing():
+    """A --since/--until run fetches a slice; it must not shrink messages.json.
+
+    The transcript says messages.json holds the complete raw data, and the
+    landing page counts from it, so a dated run has to merge into the archive
+    (fresh copy wins) rather than overwrite it with the slice."""
+    def msg(mid, day, body):
+        return {"id": mid, "message_type": "general", "sender": {"name": "Ms. A"},
+                "subject": f"s{mid}", "message": body, "posted_at": f"2025-06-{day}T10:00:00Z"}
+
+    inbox = [msg(1, "01", "first"), msg(2, "10", "second"), msg(3, "20", "third")]
+    orig_paginate, orig_carers = pd._paginate, pd.fetch_carers
+
+    def fake_paginate(session, base, path, reauth, *keys, params=None):
+        return list(inbox) if path == pd.MESSAGES_PATH else []
+
+    pd._paginate, pd.fetch_carers = fake_paginate, lambda *a, **kw: []
+    out = tempfile.mkdtemp(prefix="pd_msgmerge_")
+    try:
+        with redirect_stdout(io.StringIO()):
+            pd.archive_messages(None, None, "https://x/", out)
+            inbox[1] = msg(2, "10", "second, edited")
+            pd.archive_messages(None, None, "https://x/", out,
+                                since_dt=datetime(2025, 6, 5), until_dt=datetime(2025, 6, 15))
+    finally:
+        pd._paginate, pd.fetch_carers = orig_paginate, orig_carers
+
+    with open(os.path.join(out, "Messages", "messages.json"), encoding="utf-8") as fh:
+        saved = json.load(fh)["messages"]
+    assert sorted(m["id"] for m in saved) == [1, 2, 3], "a dated run dropped messages"
+    assert next(m for m in saved if m["id"] == 2)["message"] == "second, edited"
+    transcript = open(os.path.join(out, "Messages", "messages.html"), encoding="utf-8").read()
+    assert "3 message(s)" in transcript and "first" in transcript and "third" in transcript
 
 
 def test_select_data_independent_flags():

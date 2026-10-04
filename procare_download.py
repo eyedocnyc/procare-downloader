@@ -1956,11 +1956,40 @@ def fetch_carers(session, base, reauth=None):
     return out
 
 
+def load_archived_messages(path):
+    """The saved messages.json as {"conversations": [...], "messages": [...]}.
+
+    Missing or unreadable -> empty lists, so a first run starts clean."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, list):  # tolerate a bare list of messages
+        data = {"messages": data}
+    if not isinstance(data, dict):
+        data = {}
+    return {key: [m for m in data.get(key) or [] if isinstance(m, dict)]
+            for key in ("conversations", "messages")}
+
+
+def merge_archived_messages(archived, fresh):
+    """`archived` plus `fresh`, deduped by id; the fresh copy of a message wins.
+
+    messages.json is merged, never replaced: a --since/--until run fetches only
+    a slice, and replacing the file with it would drop everything outside the
+    slice. Keys come from the scrubbed form, since that is what was saved."""
+    merged = {_item_id(scrub_signed_urls(m)): m for m in archived or []}
+    merged.update((_item_id(scrub_signed_urls(m)), m) for m in fresh or [])
+    return list(merged.values())
+
+
 def archive_messages(session, media_session, base, out_dir, since_dt=None, until_dt=None, reauth=None):
     """Fetch, archive, and render the parent's message threads (experimental).
 
     Writes Messages/messages.json (raw, signed URLs stripped, owner-only) as the
-    source of truth, Messages/messages.html as a readable transcript, and
+    source of truth -- merged with the saved file, never replaced -- then
+    Messages/messages.html from that merged set as a readable transcript, and
     downloads any attachments. `since_dt`/`until_dt` keep only messages whose
     timestamp falls in range (client-side — the API's own date-filter params are
     unverified — so it's handy for pulling a few days to refine the format).
@@ -1979,9 +2008,13 @@ def archive_messages(session, media_session, base, out_dir, since_dt=None, until
 
     msg_dir = os.path.join(out_dir, "Messages")
     os.makedirs(msg_dir, exist_ok=True)
-    write_private_json(os.path.join(msg_dir, "messages.json"),
-                       {"conversations": scrub_signed_urls(conversations),
-                        "messages": scrub_signed_urls(messages)})
+    json_path = os.path.join(msg_dir, "messages.json")
+    archived = load_archived_messages(json_path)
+    all_conversations = merge_archived_messages(archived["conversations"], conversations)
+    all_messages = merge_archived_messages(archived["messages"], messages)
+    write_private_json(json_path,
+                       {"conversations": scrub_signed_urls(all_conversations),
+                        "messages": scrub_signed_urls(all_messages)})
 
     att_dir = os.path.join(msg_dir, "attachments")
     stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
@@ -2002,17 +2035,18 @@ def archive_messages(session, media_session, base, out_dir, since_dt=None, until
     carers = fetch_carers(session, base, reauth)
     our_ids = {c["id"] for c in carers if c.get("id")}
     our_names = {c["name"] for c in carers if c.get("name")}
-    ours = sum(1 for m in messages if _is_from_us(m, our_ids, our_names))
+    ours = sum(1 for m in all_messages if _is_from_us(m, our_ids, our_names))
 
     html_path = os.path.join(msg_dir, "messages.html")
     with open(html_path, "w", encoding="utf-8") as fh:
-        fh.write(render_messages_html(conversations, messages, our_ids, our_names))
+        fh.write(render_messages_html(all_conversations, all_messages, our_ids, our_names))
     if os.name == "posix":
         try:
             os.chmod(html_path, 0o600)
         except OSError:
             pass
-    print(f"  {len(messages)} message(s) ({ours} from your family), "
+    print(f"  {len(messages)} message(s) fetched, {len(all_messages)} in the archive "
+          f"({ours} from your family), "
           f"{stats['downloaded']} attachment(s) -> Messages/messages.html")
     return len(messages)
 
