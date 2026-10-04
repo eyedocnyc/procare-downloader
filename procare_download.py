@@ -145,9 +145,10 @@ POLITE_DELAY = 0.25  # seconds between requests, to be gentle on the API
 # so SILENTLY: the endpoint keeps answering HTTP 200 but every list comes back
 # empty. A walk that treats "empty page" as "end of data" therefore stops early
 # and reports success while having archived only a fraction of the media (this is
-# exactly how ~6,500 photos were missed). The gallery endpoints return a `total`
-# alongside each page, so the walk can tell "there is genuinely nothing here"
-# (total == 0) from "we were cut off mid-way" (collected < total) and wait.
+# exactly how a multi-year walk once missed most of its photos). The gallery
+# endpoints return a `total` alongside each page, so the walk can tell "there is
+# genuinely nothing here" (total == 0) from "we were cut off mid-way"
+# (collected < total) and wait.
 #
 # The response to being throttled is to slow down and wait, not to disguise the
 # client: requests are paced with human-scale jitter, one connection, no

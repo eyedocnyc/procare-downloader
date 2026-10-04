@@ -458,17 +458,17 @@ def test_gallery_canary_distinguishes_empty_from_throttled():
     # so a single window can never tell the two apart on its own.
     from datetime import date as _date
     orig = pd.fetch_json
-    pd.fetch_json = lambda *a, **k: {"total": 1361, "photos": []}
+    pd.fetch_json = lambda *a, **k: {"total": 1234, "photos": []}
     try:
         assert pd._gallery_canary(None, "https://api-school.procareconnect.com/api/web/",
-                                  "k1", _date(2024, 11, 1), _date(2025, 7, 31)) == 1361
+                                  "k1", _date(2022, 1, 1), _date(2022, 12, 31)) == 1234
     finally:
         pd.fetch_json = orig
     # Throttled (or truly empty): photos AND videos both report zero.
     pd.fetch_json = lambda *a, **k: {"total": 0, "photos": [], "videos": []}
     try:
         assert not pd._gallery_canary(None, "https://api-school.procareconnect.com/api/web/",
-                                      "k1", _date(2024, 11, 1), _date(2025, 7, 31))
+                                      "k1", _date(2022, 1, 1), _date(2022, 12, 31))
     finally:
         pd.fetch_json = orig
 
@@ -488,7 +488,7 @@ def test_gallery_canary_falls_back_to_videos():
     pd.fetch_json = fake
     try:
         assert pd._gallery_canary(None, "https://api-school.procareconnect.com/api/web/",
-                                  "k1", _date(2024, 11, 1), _date(2025, 7, 31)) == 7
+                                  "k1", _date(2022, 1, 1), _date(2022, 12, 31)) == 7
     finally:
         pd.fetch_json = orig
 
