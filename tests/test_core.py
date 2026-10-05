@@ -13,6 +13,7 @@ single vs. multiple children (including per-child media isolation).
 import builtins
 import html
 import io
+import json
 import os
 import re
 import sys
@@ -615,12 +616,58 @@ def test_error_page_rejected():
     assert pd._looks_like_error_page(None, b"\x00\x00\x00\x18ftypmp42") is False
 
 
+def test_download_file_leaves_no_partial_when_the_stream_breaks():
+    """A connection that drops mid-body on the last attempt must not strand a
+    `.part` file next to the media: nothing would ever clean it up."""
+    class Broken:
+        status_code, headers = 200, {"Content-Type": "image/jpeg"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size=0):
+            yield b"\xff\xd8\xff\x00"
+            raise pd.requests.exceptions.ChunkedEncodingError("connection reset")
+
+    class Session:
+        def get(self, url, **kw):
+            return Broken()
+
+    out = tempfile.mkdtemp(prefix="pd_part_")
+    dest = os.path.join(out, "photo.part")
+    orig_sleep, pd.time.sleep = pd.time.sleep, lambda *_a: None
+    try:
+        ok, _head = pd.download_file(Session(), Session(), "https://cdn/x.jpg", dest)
+    finally:
+        pd.time.sleep = orig_sleep
+    assert ok is False
+    assert os.listdir(out) == [], f"partial download left behind: {os.listdir(out)}"
+
+
 def test_stable_media_ident_deterministic():
     u = "https://cdn/attachments/files/x/original/open-uri-random?Signature=changes"
     # Deterministic across calls, ignores the (changing) query, never "None"/hash().
     a = pd.stable_media_ident(u)
     b = pd.stable_media_ident("https://cdn/attachments/files/x/original/open-uri-random?Signature=other")
     assert a == b and a and a != "None" and len(a) == 20
+
+
+def test_find_local_media_handles_an_undated_item():
+    """An item with no date is saved under the run's own timestamp (the
+    downloader falls back to now()), so a later lookup can't rebuild its stem.
+    It must still be found by kind+ident -- and must never crash the caller,
+    which would abort the run before the feed and scrapbook are written."""
+    out = tempfile.mkdtemp(prefix="pd_nodate_")
+    assert pd.find_local_media(out, None, "photo", "p1") is None
+    saved = datetime(2026, 1, 2, 3, 4, 5)
+    md = os.path.join(out, saved.strftime("%Y-%m"))
+    os.makedirs(md)
+    path = os.path.join(md, pd.media_stem(saved, "photo", "p1") + ".jpg")
+    open(path, "wb").write(b"\xff\xd8\xff\x00")
+    assert pd.find_local_media(out, None, "photo", "p1") == path
 
 
 def test_idless_records_stay_distinct():
@@ -917,6 +964,17 @@ def test_exiftool_args_cover_exif_iptc_xmp():
     assert "-EXIF:Artist=Ms. A" in args and "-XMP-dc:Creator=Ms. A" in args
 
 
+def test_exiftool_keywords_are_written_idempotently():
+    """`+=` alone appends even when the keyword is already there, so every
+    re-tag (a lost marker, --overwrite) duplicated the person tag. exiftool's
+    documented `-=` then `+=` pair removes the value before adding it back."""
+    args = pd._exiftool_args({"keywords": ["Maya", "activity"]})
+    for tag in ("-IPTC:Keywords", "-XMP-dc:Subject"):
+        for kw in ("Maya", "activity"):
+            add = args.index(f"{tag}+={kw}")
+            assert args[add - 1] == f"{tag}-={kw}", f"{tag}+={kw} needs a -= before it"
+
+
 def test_find_local_media_looks_in_gallery_subtree():
     out = tempfile.mkdtemp(prefix="pd_gal_")
     dt = datetime(2025, 6, 1, 10)
@@ -1121,6 +1179,43 @@ def test_message_body_html_links_and_escaping():
     assert "<a" not in pd._message_body_html('<a href="javascript:alert(1)">x</a>')
 
 
+def test_message_body_html_bare_url_cannot_swallow_a_link():
+    """A bare URL right before an <a> must not absorb that link's placeholder.
+
+    It used to: the link was spliced into the bare URL's href attribute, so a
+    crafted message could break out of the attribute and add an event handler,
+    and ordinary rich text rendered as broken nested anchors."""
+    from html.parser import HTMLParser
+
+    class Tags(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags = []
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append((tag, attrs))
+
+    cases = [  # (body, anchors expected, visible link text)
+        ('https://zoom.us/j/1<strong><a href="https://ok.com/ onmouseover=alert(1) x=">'
+         'join</a>', 2, "join"),
+        ('https://forms.gle/a<span><a href="https://ok.com/b">form</a></span> and <b>bold</b>',
+         2, "form"),
+        ('Hi \x000\x00 <a href="https://ok.com/c">c</a>', 1, "c"),  # a forged placeholder
+    ]
+    for body, anchors, text in cases:
+        out = pd._message_body_html(body)
+        parser = Tags()
+        parser.feed(out)
+        assert [t for t, _ in parser.tags if t != "br"] == ["a"] * anchors, out
+        for _tag, attrs in parser.tags:
+            names = {name for name, _value in attrs}
+            assert names <= {"href", "target", "rel"}, f"unexpected attribute in {out}"
+            assert not any(name.startswith("on") for name in names), out
+            assert not any("<" in (value or "") for _name, value in attrs), \
+                f"markup nested inside an attribute: {out}"
+        assert f">{html.escape(text, quote=False)}</a>" in out, out
+
+
 def test_is_from_us_matches_family_sender():
     fam_id, fam_names = {"u1"}, {"Jamie Lee"}
     assert pd._is_from_us({"sender": {"id": "u1", "name": "Ray"}}, fam_id, fam_names)   # by id
@@ -1160,6 +1255,37 @@ def test_message_attachment_urls_keeps_documents():
     assert pd.ext_from_url("https://cdn/msgs/files/n4/nosuffix", ".bin") == ".bin"
 
 
+def test_scrapbook_keeps_undated_records_in_their_own_bucket():
+    """A record with no usable date must neither crash the build nor vanish.
+
+    `day_key` returns "unknown" for it, which used to reach `month_label` as a
+    month key and abort the whole scrapbook."""
+    out = tempfile.mkdtemp(prefix="pd_undated_")
+    act = photo_activity("k1", "2025-01-08", "p1")
+    plant(out, act)
+    undated = {"activity_type": "note_activity", "id": "n1", "kid_ids": ["k1"],
+               "comment": "A note with no date"}
+    undated_photo = {"activity_type": "photo_activity", "id": "n2", "kid_ids": ["k1"],
+                     "activiable": {"id": "p9",
+                                    "main_url": "https://cdn/photos/files/p9/main/p9.jpg"}}
+    # The downloader files an undated item under the day it was fetched.
+    fetched = os.path.join(out, sb.MEDIA_DIR, "2026-10")
+    os.makedirs(fetched)
+    open(os.path.join(fetched, "2026-10-04_120000_photo_p9.jpg"), "w").close()
+    pages = sb.build_scrapbook([{"name": "Maya", "class_name": "", "folder": "",
+                                 "records": [undated, undated_photo, act]}], out)
+    assert pages == 2, "the undated records get a page of their own"
+    pages_dir = os.path.join(out, sb.PAGES_DIR)
+    undated_page = open(os.path.join(pages_dir, sb.month_filename(sb.UNDATED)),
+                        encoding="utf-8").read()
+    assert "A note with no date" in undated_page
+    assert "2026-10-04_120000_photo_p9.jpg" in undated_page, "undated media is still linked"
+    january = open(os.path.join(pages_dir, "2025-01 (January 2025).html"), encoding="utf-8").read()
+    assert "A note with no date" not in january
+    landing = open(os.path.join(out, "Open Scrapbook.html"), encoding="utf-8").read()
+    assert landing.index("January 2025") < landing.index(sb.UNDATED), "undated sorts last"
+
+
 def test_render_messages_html_channels_family_style_and_order():
     msgs = [{"message_type": "general", "sender": {"name": "Ms. A"}, "subject": "Older",
              "message": '<p>Visit <a href="https://x.test/a">link</a></p>',
@@ -1178,6 +1304,41 @@ def test_render_messages_html_channels_family_style_and_order():
     assert "weird_field" in html                                         # bodyless -> raw JSON
     # Reverse chronological within a channel: newest ("Newer") before oldest ("Older").
     assert html.index("Newer") < html.index("Older")
+
+
+def test_archive_messages_merges_instead_of_replacing():
+    """A --since/--until run fetches a slice; it must not shrink messages.json.
+
+    The transcript says messages.json holds the complete raw data, and the
+    landing page counts from it, so a dated run has to merge into the archive
+    (fresh copy wins) rather than overwrite it with the slice."""
+    def msg(mid, day, body):
+        return {"id": mid, "message_type": "general", "sender": {"name": "Ms. A"},
+                "subject": f"s{mid}", "message": body, "posted_at": f"2025-06-{day}T10:00:00Z"}
+
+    inbox = [msg(1, "01", "first"), msg(2, "10", "second"), msg(3, "20", "third")]
+    orig_paginate, orig_carers = pd._paginate, pd.fetch_carers
+
+    def fake_paginate(session, base, path, reauth, *keys, params=None):
+        return list(inbox) if path == pd.MESSAGES_PATH else []
+
+    pd._paginate, pd.fetch_carers = fake_paginate, lambda *a, **kw: []
+    out = tempfile.mkdtemp(prefix="pd_msgmerge_")
+    try:
+        with redirect_stdout(io.StringIO()):
+            pd.archive_messages(None, None, "https://x/", out)
+            inbox[1] = msg(2, "10", "second, edited")
+            pd.archive_messages(None, None, "https://x/", out,
+                                since_dt=datetime(2025, 6, 5), until_dt=datetime(2025, 6, 15))
+    finally:
+        pd._paginate, pd.fetch_carers = orig_paginate, orig_carers
+
+    with open(os.path.join(out, "Messages", "messages.json"), encoding="utf-8") as fh:
+        saved = json.load(fh)["messages"]
+    assert sorted(m["id"] for m in saved) == [1, 2, 3], "a dated run dropped messages"
+    assert next(m for m in saved if m["id"] == 2)["message"] == "second, edited"
+    transcript = open(os.path.join(out, "Messages", "messages.html"), encoding="utf-8").read()
+    assert "3 message(s)" in transcript and "first" in transcript and "third" in transcript
 
 
 def test_select_data_independent_flags():

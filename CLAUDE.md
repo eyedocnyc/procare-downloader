@@ -143,6 +143,8 @@ shared by the download path and the renderer so filenames always agree
 (`media_stem` / `find_local_media`). Landing pages show a summary (`stats_html`); every page includes a
 photo lightbox (`LIGHTBOX` injected by `page_shell`). Cross-folder links use real relative paths
 (`rel_href`).
+- **A record with no usable date goes on an `Undated` page, listed last** (`scrapbook.UNDATED`), never
+  dropped; its media is found by ident, since the downloader filed it under the download date.
 - **The landing page `<h1>` never assumes a duration.** `_build_section` used to render
   `"{who}'s Year in {class}"` and "A year of memories" — both wrong whenever the actual span is
   shorter than a year, or (since `detect_class_name`'s multi-class fix) `class_name` is really a list
@@ -204,6 +206,10 @@ it idempotent; `--overwrite` re-tags everything.
   Photos won't filter those). Never required — the shipped app has no exiftool, so keep the fallback
   working. `_exiftool_args` is pure (unit-tested); the subprocess/piexif writes aren't.
 - Both writers bump the file mtime, so the writer restores the capture-date mtime afterward.
+- **Keyword writes are idempotent:** `_exiftool_args` emits `-TAG-=kw` before `-TAG+=kw` for
+  `IPTC:Keywords` and `XMP-dc:Subject` (exiftool's documented no-duplicate idiom; `+=` alone appends
+  a second copy on every re-tag). Re-tagging a file is therefore harmless, and it also collapses copies
+  an older version duplicated. Keywords other apps added are kept.
 
 ## Security / privacy
 
@@ -242,7 +248,8 @@ it idempotent; `--overwrite` re-tags everything.
   pipeline when media isn't selected — so `--messages` alone does NOT re-walk the photo feed. Add new data
   types here (documents, billing) as their own flag + a branch, and include them in `--all-data`.
 - **`--messages` (EXPERIMENTAL, `archive_messages`)** archives parent↔staff chat to `Messages/` (raw
-  `messages.json` + a best-effort `messages.html` + attachments); honors `--since`/`--until` (client-side
+  `messages.json`, **merged** by message id with the saved file and never replaced, so a dated run can't
+  shrink it, + a best-effort `messages.html` + attachments); honors `--since`/`--until` (client-side
   filter — the API's own date param is unverified). **Shape confirmed against a live account:** a
   `parent/messages` item is `{id, sender:{name}, message (HTML body), posted_at, subject, message_type,
   thread, kids[], attachments[]}`. Key gotchas: **`message_type` is the chat CHANNEL** — `parent_admin_com`

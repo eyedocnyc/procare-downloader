@@ -576,54 +576,58 @@ def download_file(session, media_session, url, dest):
         # fetched over a channel that could expose a signed link or be tampered.
         return False, b""
     use_session = session if is_procare_host(url) else media_session
-    for attempt in range(RETRIES):
-        try:
-            with use_session.get(url, stream=True, timeout=REQUEST_TIMEOUT,
-                                 allow_redirects=True) as resp:
-                if resp.status_code != 200:
-                    if resp.status_code in (429, 500, 502, 503, 504) and attempt < RETRIES - 1:
-                        time.sleep(2 ** attempt)
-                        continue
+    tmp = dest + ".part"
+    try:
+        for attempt in range(RETRIES):
+            try:
+                with use_session.get(url, stream=True, timeout=REQUEST_TIMEOUT,
+                                     allow_redirects=True) as resp:
+                    if resp.status_code != 200:
+                        if resp.status_code in (429, 500, 502, 503, 504) and attempt < RETRIES - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        return False, b""
+
+                    expected = resp.headers.get("Content-Length")
+                    expected = int(expected) if expected and expected.isdigit() else None
+                    content_type = resp.headers.get("Content-Type")
+
+                    written = 0
+                    head = b""
+                    with open(tmp, "wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=1 << 16):
+                            if chunk:
+                                if not head:
+                                    head = chunk[:16]
+                                fh.write(chunk)
+                                written += len(chunk)
+
+                    # An HTML/JSON error page served with a 200 is a complete, wrong
+                    # response — retrying the same (e.g. expired-signature) URL just
+                    # returns it again, so fail fast without burning the backoff.
+                    if _looks_like_error_page(content_type, head):
+                        return False, b""
+
+                    # A truncated/empty body, by contrast, is often a transient hiccup
+                    # worth retrying.
+                    if written == 0 or (expected is not None and written != expected):
+                        if attempt < RETRIES - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        return False, b""
+
+                    os.replace(tmp, dest)
+                    return True, head
+            except requests.RequestException:
+                if attempt == RETRIES - 1:
                     return False, b""
-
-                expected = resp.headers.get("Content-Length")
-                expected = int(expected) if expected and expected.isdigit() else None
-                content_type = resp.headers.get("Content-Type")
-
-                tmp = dest + ".part"
-                written = 0
-                head = b""
-                with open(tmp, "wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=1 << 16):
-                        if chunk:
-                            if not head:
-                                head = chunk[:16]
-                            fh.write(chunk)
-                            written += len(chunk)
-
-                # An HTML/JSON error page served with a 200 is a complete, wrong
-                # response — retrying the same (e.g. expired-signature) URL just
-                # returns it again, so fail fast without burning the backoff.
-                if _looks_like_error_page(content_type, head):
-                    _remove_quiet(tmp)
-                    return False, b""
-
-                # A truncated/empty body, by contrast, is often a transient hiccup
-                # worth retrying.
-                if written == 0 or (expected is not None and written != expected):
-                    _remove_quiet(tmp)
-                    if attempt < RETRIES - 1:
-                        time.sleep(2 ** attempt)
-                        continue
-                    return False, b""
-
-                os.replace(tmp, dest)
-                return True, head
-        except requests.RequestException:
-            if attempt == RETRIES - 1:
-                return False, b""
-            time.sleep(2 ** attempt)
-    return False, b""
+                time.sleep(2 ** attempt)
+        return False, b""
+    finally:
+        # Whatever ended the attempt -- a bad body, retries used up, or an
+        # exception mid-stream -- a partial file must not outlive it. After a
+        # success it was already renamed to `dest`, so this is a no-op.
+        _remove_quiet(tmp)
 
 
 def apply_timestamp(path, dt):
@@ -689,15 +693,19 @@ def _exiftool_args(meta):
     """Build the exiftool tag arguments (no file path) for one item's metadata.
 
     Pure -> unit-tested. Writes each value into the EXIF, IPTC and XMP homes the
-    various photo apps read, so captions/keywords show up whatever browses them."""
+    various photo apps read, so captions/keywords show up whatever browses them.
+
+    Re-running it on a tagged file changes nothing: each keyword is removed
+    (`-=`) and then added (`+=`), exiftool's documented idiom for adding a list
+    item without duplicating it. Keywords added by other apps are kept."""
     args = ["-overwrite_original", "-codedcharacterset=utf8",
             f"-XMP-xmp:CreatorTool={META_TOOL_TAG}"]
     if meta.get("caption"):
         for tag in ("-EXIF:ImageDescription=", "-IPTC:Caption-Abstract=", "-XMP-dc:Description="):
             args.append(tag + meta["caption"])
     for kw in meta.get("keywords") or []:
-        args.append(f"-IPTC:Keywords+={kw}")
-        args.append(f"-XMP-dc:Subject+={kw}")
+        for tag in ("-IPTC:Keywords", "-XMP-dc:Subject"):
+            args.extend((f"{tag}-={kw}", f"{tag}+={kw}"))
     if meta.get("creator"):
         args.append(f"-EXIF:Artist={meta['creator']}")
         args.append(f"-XMP-dc:Creator={meta['creator']}")
@@ -844,15 +852,18 @@ def find_local_media(out_dir, dt, label, ident):
     Looks in the activity month folder AND the `Gallery/` subtree, since untagged
     gallery media is filed under `Gallery/<month>/` (see `media_month_dir`)."""
     ident = str(ident)
-    stem = media_stem(dt, label, ident)
     gallery_root = os.path.join(out_dir, GALLERY_SUBDIR)
     # Fast path: the exact month folder in either the activity or the gallery tree.
-    for base in (out_dir, gallery_root):
-        month_dir = os.path.join(base, dt.strftime("%Y-%m"))
-        matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
-                   if not p.endswith(".part")]
-        if matches:
-            return matches[0]
+    # An undated item was saved under the downloading run's own clock, so its stem
+    # can't be rebuilt; only the label+ident fallback below can find it.
+    if dt is not None:
+        stem = media_stem(dt, label, ident)
+        for base in (out_dir, gallery_root):
+            month_dir = os.path.join(base, dt.strftime("%Y-%m"))
+            matches = [p for p in glob.glob(os.path.join(glob.escape(month_dir), stem + ".*"))
+                       if not p.endswith(".part")]
+            if matches:
+                return matches[0]
     # Fallback: same label+ident in any month of either tree (the recorded month
     # may differ slightly from the lookup), since ident is unique.
     for pat in (os.path.join(glob.escape(out_dir), "*", f"*_{label}_{glob.escape(ident)}.*"),
@@ -1797,6 +1808,9 @@ def _message_body_html(text):
     the local transcript. The raw body stays untouched in messages.json."""
     if not isinstance(text, str):
         return ""
+    # Links are parked as NUL-delimited placeholders while the rest is stripped;
+    # a NUL in the body itself could forge one, so drop them first.
+    text = text.replace("\x00", "")
     links = []
 
     def _stash(mt):
@@ -1816,9 +1830,11 @@ def _message_body_html(text):
                  ("&#39;", "'"), ("&nbsp;", " ")):
         t = t.replace(a, b)
     t = t.strip()
-    # Escape text and turn bare URLs into links, segment by segment.
+    # Escape text and turn bare URLs into links, segment by segment. A bare URL
+    # stops at a placeholder: swallowing one would splice a whole anchor into
+    # this URL's href attribute.
     out = []
-    for i, seg in enumerate(re.split(r"(https?://[^\s<]+)", t)):
+    for i, seg in enumerate(re.split(r"(https?://[^\s<\x00]+)", t)):
         out.append(f'<a href="{_html_escape(seg)}" target="_blank" rel="noopener">{_html_escape(seg)}</a>'
                    if i % 2 else _html_escape(seg))
     t = "".join(out)
@@ -1951,11 +1967,40 @@ def fetch_carers(session, base, reauth=None):
     return out
 
 
+def load_archived_messages(path):
+    """The saved messages.json as {"conversations": [...], "messages": [...]}.
+
+    Missing or unreadable -> empty lists, so a first run starts clean."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, list):  # tolerate a bare list of messages
+        data = {"messages": data}
+    if not isinstance(data, dict):
+        data = {}
+    return {key: [m for m in data.get(key) or [] if isinstance(m, dict)]
+            for key in ("conversations", "messages")}
+
+
+def merge_archived_messages(archived, fresh):
+    """`archived` plus `fresh`, deduped by id; the fresh copy of a message wins.
+
+    messages.json is merged, never replaced: a --since/--until run fetches only
+    a slice, and replacing the file with it would drop everything outside the
+    slice. Keys come from the scrubbed form, since that is what was saved."""
+    merged = {_item_id(scrub_signed_urls(m)): m for m in archived or []}
+    merged.update((_item_id(scrub_signed_urls(m)), m) for m in fresh or [])
+    return list(merged.values())
+
+
 def archive_messages(session, media_session, base, out_dir, since_dt=None, until_dt=None, reauth=None):
     """Fetch, archive, and render the parent's message threads (experimental).
 
     Writes Messages/messages.json (raw, signed URLs stripped, owner-only) as the
-    source of truth, Messages/messages.html as a readable transcript, and
+    source of truth -- merged with the saved file, never replaced -- then
+    Messages/messages.html from that merged set as a readable transcript, and
     downloads any attachments. `since_dt`/`until_dt` keep only messages whose
     timestamp falls in range (client-side — the API's own date-filter params are
     unverified — so it's handy for pulling a few days to refine the format).
@@ -1974,9 +2019,13 @@ def archive_messages(session, media_session, base, out_dir, since_dt=None, until
 
     msg_dir = os.path.join(out_dir, "Messages")
     os.makedirs(msg_dir, exist_ok=True)
-    write_private_json(os.path.join(msg_dir, "messages.json"),
-                       {"conversations": scrub_signed_urls(conversations),
-                        "messages": scrub_signed_urls(messages)})
+    json_path = os.path.join(msg_dir, "messages.json")
+    archived = load_archived_messages(json_path)
+    all_conversations = merge_archived_messages(archived["conversations"], conversations)
+    all_messages = merge_archived_messages(archived["messages"], messages)
+    write_private_json(json_path,
+                       {"conversations": scrub_signed_urls(all_conversations),
+                        "messages": scrub_signed_urls(all_messages)})
 
     att_dir = os.path.join(msg_dir, "attachments")
     stats = {"downloaded": 0, "skipped_exist": 0, "skipped_old": 0, "failed": 0}
@@ -1997,17 +2046,18 @@ def archive_messages(session, media_session, base, out_dir, since_dt=None, until
     carers = fetch_carers(session, base, reauth)
     our_ids = {c["id"] for c in carers if c.get("id")}
     our_names = {c["name"] for c in carers if c.get("name")}
-    ours = sum(1 for m in messages if _is_from_us(m, our_ids, our_names))
+    ours = sum(1 for m in all_messages if _is_from_us(m, our_ids, our_names))
 
     html_path = os.path.join(msg_dir, "messages.html")
     with open(html_path, "w", encoding="utf-8") as fh:
-        fh.write(render_messages_html(conversations, messages, our_ids, our_names))
+        fh.write(render_messages_html(all_conversations, all_messages, our_ids, our_names))
     if os.name == "posix":
         try:
             os.chmod(html_path, 0o600)
         except OSError:
             pass
-    print(f"  {len(messages)} message(s) ({ours} from your family), "
+    print(f"  {len(messages)} message(s) fetched, {len(all_messages)} in the archive "
+          f"({ours} from your family), "
           f"{stats['downloaded']} attachment(s) -> Messages/messages.html")
     return len(messages)
 
