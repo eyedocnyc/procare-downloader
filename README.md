@@ -147,9 +147,38 @@ uv run ruff check .
 | `--all-data` | Archive everything the tool knows how to fetch |
 | `--overwrite` | Re-download files that already exist |
 | `--videos-only` | Only process videos |
+| `--gentle` | Read at a slower, more human pace — use it if Procare keeps rate-limiting you |
 | `--debug` | Save one sample of each activity type to `debug_activities.json` |
 
 Running with **no arguments** (or double-clicking the app) starts a friendly guided menu.
+
+### If a download says INCOMPLETE
+
+Procare limits how fast an account can read, and it does it **silently** — it keeps answering
+normally but sends back empty lists, with no error and no "429". A download that trusted those
+answers would stop early and tell you it had finished.
+
+So the download now counts: each month is read until it has as many items as Procare says that
+month holds. Anything it could not finish is listed at the end:
+
+```
+  !! INCOMPLETE — Procare rate-limited these gallery windows, so
+     some media was NOT downloaded:
+       2023-03  photos: got 40 of 500
+       2023-04  photos: got 0 of ?
+     Wait a while (rate limits lift on their own) and re-run the same
+     command — files you already have are skipped.
+```
+
+`?` means Procare was answering with nothing at all, so the month's real size is unknown. If the
+limit doesn't lift after about an hour of waiting, the tool stops waiting and lists every month
+it still couldn't read, rather than spending hours on each one.
+
+That is not a failure, it is the tool refusing to call a partial archive complete. **Run the same
+command again later** — files you already have are skipped, so only the missing media is
+downloaded (every month is still re-checked with Procare, so the walk itself takes as long as
+before). If it keeps happening, add `--gentle`, which reads at a several-second pace instead of
+racing.
 
 #### Unattended runs
 

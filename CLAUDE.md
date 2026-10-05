@@ -112,6 +112,53 @@ Public repo: https://github.com/eyedocnyc/procare-downloader
   authenticity via **signed update manifests is the documented next step** if the threat model warrants
   it. `_swap_file` / `_windows_script` are pure so they're unit-tested; the `os.execv`/detached-`.bat`
   relaunch is process-bound and stays behind the fail-safe fallback.
+- **Procare rate-limits SILENTLY, and the walk must not mistake that for "no data".** A parent
+  account that reads quickly for a while starts getting HTTP **200 with an empty list** — no 429, no
+  error — and, critically, **`total` comes back `0` as well**. So a throttled window is byte-identical
+  to a genuinely empty one when you only look at that window, and the old "stop on the first empty
+  page" pagination ended a multi-year gallery walk after a few hundred rows while reporting success.
+  Four things guard against that now, and none of them should be removed:
+  1. `_paginate_gallery` pages until it has seen the response's own **`total`** rows, not until a page
+     is empty, and returns `(entries, total, complete)`. An EMPTY page with rows still outstanding is
+     treated as throttling: it waits (`THROTTLE_BACKOFF`, never past `THROTTLE_MAX_WAIT`) and retries
+     **the same page**. A short but non-empty page just moves on to the next one.
+  2. `_gallery_canary` asks for one page covering the **whole date range**. If the account has any
+     gallery media this must be positive, so it is the only reliable way to tell "empty" from
+     "rate-limited". A failed photos request still asks videos; `None` means neither answered. The
+     walk's first canary runs after the activity walk, so it may land in a throttled spell:
+     `ThrottleGuard.first_canary` re-asks a zero once after `CANARY_RECHECK_WAIT`.
+  3. **`_read_window` is the ONE place that decides what a window's answer means**: `complete`
+     (positive `total`, all seen), `empty`, `short`, or `unverified`. `empty` needs two empty reads,
+     each followed by a positive canary (the limiter can lift between a throttled read and the
+     canary). An empty read with a zero canary is waited out (`_wait_out_throttle`) and read again.
+     Without a positive canary an empty window is `unverified` and not reported, since the account may
+     really have no gallery media. Never accept a `total: 0` answer while the limiter may be on.
+  4. Windows that come up `short` land in `gallery_shortfalls` and are printed as a loud
+     **`!! INCOMPLETE`** block by `_print_download_summary`, with `?` for a total the throttle hid.
+     A partial archive must never look complete.
+  **One `ThrottleGuard` per run carries a circuit breaker.** After one failed wait-out, every later
+  throttled window (any child) is marked short without waiting again. Without it, a limiter that never
+  lifts cost about 37 hours per child over two years of months.
+  **This covers the gallery walk only.** The activity feed returns no `total`, so a throttled feed
+  month is still indistinguishable from a quiet one there.
+  **There is no resume state:** every run re-reads every gallery month; only already-downloaded files
+  are skipped. Don't tell users a re-run skips finished months.
+  `--gentle` (`GENTLE_DELAY`/`GENTLE_JITTER`, set by `enable_gentle_pacing`) reads at a several-second
+  human pace instead of 0.25s; it is the fix for an account that keeps getting limited. All request
+  pacing goes through `polite_sleep()`, which reads `POLITE_DELAY` at call time (a default argument
+  would freeze the 0.25s) and jitters every delay — steady metronome timing is both ruder and likelier
+  to trip a limiter than the same average rate spread unevenly. The rate limit is a **server protection
+  mechanism**: the supported response is to slow down, back off and resume later. Do NOT "solve" it by
+  rotating IPs/proxies, forging multiple identities or parallelising harder.
+- **The activity feed only retains ~12 months; the gallery keeps everything.** Records age out of
+  `parent/daily_activities` (verified: a month that returned hundreds of records returned none at all
+  five weeks later) while the same photos stay reachable via `parent/photos`/`parent/videos` with date
+  filters. Two consequences: (a) a **re-run can return FEWER feed records than the last one**, and
+  `Scrapbook/feed.json` is rewritten from each walk, so the aged-out cards drop out of the scrapbook
+  even though their media is still on disk — files nothing links to. Any change to how `feed.json` is
+  written must keep that history (merge, don't replace). (b) The gallery is the **only** route to
+  media older than the retention window, so a media archive that only follows the activity feed will
+  be missing everything before it.
 - **Activities and gallery are two independent, overlapping sources.** Some daycares post everything as
   activities, some skip activities and upload straight to the gallery, and some do both for the same
   photo/video. We always fetch both: `fetch_all_records` (activity feed, correctly tagged per child via
