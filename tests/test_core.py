@@ -550,6 +550,34 @@ def test_fetch_gallery_media_runs_unfiltered_and_windowed_passes():
     assert any(has_filter(p, "video") for p in seen)
 
 
+def test_unfiltered_gallery_shortfall_is_reported():
+    # Monthly windows cannot verify undated items from the all-history pass.
+    from datetime import date as _date
+    saved = pd._paginate_gallery, pd._read_window, pd.polite_sleep
+    old_shortfalls = pd.gallery_shortfalls[:]
+
+    class Guard:
+        def first_canary(self, kid_id):
+            return 5
+
+    def paginate(_session, _base, _path, kind, params, *args, **kwargs):
+        if "page" not in params and len(params) == 1:
+            return (["one"], 5, False) if kind == "photo" else ([], 0, True)
+        return [], 0, True
+
+    pd._paginate_gallery = paginate
+    pd._read_window = lambda *a, **k: ([], 0, pd.WINDOW_EMPTY)
+    pd.polite_sleep = lambda *a, **k: None
+    pd.gallery_shortfalls.clear()
+    try:
+        pd.fetch_gallery_media(None, GALLERY_BASE, "k1", _date(2025, 1, 1),
+                               _date(2025, 1, 31), guard=Guard())
+        assert ("all dates", "photo", 1, 5) in pd.gallery_shortfalls
+    finally:
+        pd._paginate_gallery, pd._read_window, pd.polite_sleep = saved
+        pd.gallery_shortfalls[:] = old_shortfalls
+
+
 GALLERY_BASE = "https://api-school.procareconnect.com/api/web/"
 
 

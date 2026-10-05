@@ -57,7 +57,7 @@ HAVE_EXIFTOOL = bool(shutil.which("exiftool"))
 # The self-updater compares this against the latest GitHub release. It MUST equal
 # the release tag (build.yml enforces APP_VERSION == the vX.Y tag on release), so
 # bump it in the same change you intend to tag.
-APP_VERSION = "1.16"
+APP_VERSION = "1.17"
 
 import updater  # noqa: E402  (top-level so PyInstaller bundles it automatically)
 
@@ -1329,6 +1329,10 @@ def fetch_gallery_media(session, base, kid_id, start_date, end_date, reauth=None
                                              dict(kid_params), reauth, guard=guard)
         entries.extend(got)
         have_media = have_media or bool(got)
+        if _total is not None and not _ok:
+            # The all-history pass may contain undated items that no monthly
+            # window can verify. Keep its known shortfall visible in the summary.
+            gallery_shortfalls.append(("all dates", kind, len(got), _total))
         for win_from, win_to in windows:
             if progress:
                 progress(win_from[:7])            # YYYY-MM label for this window
